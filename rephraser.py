@@ -231,7 +231,7 @@ if __name__ == '__main__':
     for i in freqlist:
       freqtuplelists.append([])
     # Iterate through all markov chain keys, keeping those that are in our freqlist, in the order of freqlist
-    for key in dct.GetAllKeys():
+    for key in dct.keys:
       if key == ' '.join((BEGIN,BEGIN)) or key == ' '.join((BEGIN,BEGIN,BEGIN)):
         continue
       if END in key:
@@ -281,7 +281,7 @@ if __name__ == '__main__':
       traverselikely(mpqueue, (BEGIN,BEGIN), args.words, args.batchdepth, [])
     elif args.ngrams == 3:
       traverselikely(mpqueue, (BEGIN,BEGIN,BEGIN), args.words, args.batchdepth, [])
-    for key in dct.GetAllKeys():
+    for key in dct.keys:
       if key == ' '.join((BEGIN,BEGIN)) or key == ' '.join((BEGIN,BEGIN,BEGIN)):
         continue
       # Need to convert string keys back into tuples for programmatic use
