@@ -1,8 +1,8 @@
+import os
+import sys
 import markovify
 import keyvi.compiler
 import keyvi.dictionary
-import os
-import sys
 from signal import signal, SIGINT, SIG_IGN
 import json
 import multiprocessing as mp
@@ -28,7 +28,7 @@ def sigint_handler(signal_received, frame):
   # Parent *should* be able to exit
   exit(0)
 
-def sanitizeandmutateword(word):
+def sanitizeandmutateword(word: str) -> str:
   if word[0] in undesirable_chars:
     word = word[1:]
   if word != '':
@@ -39,7 +39,7 @@ def sanitizeandmutateword(word):
   else:
     return word.capitalize()
 
-def collectall(state, depth, prefix):
+def collectall(state, depth: int, prefix: list) -> list:
   # Given a compiled dct and state, return a list of all phrases (lists) of exactly a certain length/depth in titlecase
   completedchains = []
   cstate_model = dct[' '.join(state)].GetValue()
@@ -102,9 +102,7 @@ def workercollectall(mpqueue):
           # Camelcase without spaces
           print(outlist[0].lower() + ''.join(outlist[1:]))
 
-def traverselikely(mpqueue, state, depthremaining, batchdepth, prefix):
-  if not prefix:
-    prefix = []
+def traverselikely(mpqueue, state, depthremaining: int, batchdepth: int, prefix: list = None):
   # stateweights = [[weight, index], [weight, index]]
   stateweights = []
   # Sort and traverse from at least the most common start-points
@@ -142,7 +140,7 @@ if __name__ == '__main__':
   parser.add_argument('--ngrams', '-g', type=int, help='Number of words (n-grams) that make up a state in the Markov model, it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM, and 3 for the better linguistic accuracy', choices=[2, 3], default=2)
   parser.add_argument('--corpus', '-c', help='Path to a corpus (file with sentances) to convert into a Markov model', default='')
   parser.add_argument('--corpusisdir','-d', action='store_true', help='Handle the "--corpus" path as a directory, and create a model by walking all files inside', default=False)
-  parser.add_argument('--words', '-w', type=int, help='Number of words in outputtable candidates', default=4)
+  parser.add_argument('--m', '-w', type=int, help='Number of words in outputtable candidates', default=4)
   parser.add_argument('--workers', '-x', type=int, help='Manually specify the number of workers', default=(mp.cpu_count() - 1))
   parser.add_argument('--freqlist', '-f', help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words), to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find all chain start-points (in order) depending on model * freqlist size.', default='')
   parser.add_argument('--gpusaturated', '-s', action='store_true', help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes', default=False)
