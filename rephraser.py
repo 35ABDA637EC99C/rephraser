@@ -79,28 +79,30 @@ def workercollectall(mpqueue) -> None:
         break
       outchains = collectall(state, depth, prefix)
       # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
+      space = " "
+      nospace = ""
       if not args.gpusaturated:
         for outlist in outchains:
           # Titlecase with spaces
-          print(' '.join(outlist))
+          print(f'{space.join(outlist)}')
       else:
         for outlist in outchains:
           # Titlecase with spaces
-          print(' '.join(outlist))
+          print(f'{space.join(outlist)}')
           # Titlecase without spaces
-          print(''.join(outlist))
+          print(f'{nospace.join(outlist)}')
           # Lowercase with spaces
-          print(' '.join(outlist).lower())
+          print(f'{space.join(outlist).lower()}')
           # Lowercase without spaces
-          print(''.join(outlist).lower())
+          print(f'{nospace.join(outlist).lower()}')
           # First letter capitalized with spaces
-          print(outlist[0] + ' ' + ' '.join(outlist[1:]).lower())
+          print(f'{outlist[0].capitalize() + space + space.join(outlist[1:]).lower()}')
           # First letter capitalized without spaces
-          print(outlist[0] + ''.join(outlist[1:]).lower())
+          print(f'{outlist[0].capitalize() + nospace.join(outlist[1:]).lower()}')
           # Camelcase with spaces
-          print(outlist[0].lower() + ' ' + ' '.join(outlist[1:]))
+          print(f'{outlist[0].lower() + space + space.join(outlist[1:])}')
           # Camelcase without spaces
-          print(outlist[0].lower() + ''.join(outlist[1:]))
+          print(f'{outlist[0].lower() + nospace.join(outlist[1:])}')
 
 def traverselikely(mpqueue, state, depthremaining: int, batchdepth: int, prefix: list = None) -> None:
   # stateweights = [[weight, index], [weight, index]]
