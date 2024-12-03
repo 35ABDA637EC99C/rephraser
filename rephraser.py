@@ -42,7 +42,7 @@ def sanitizeandmutateword(word: str) -> str:
 def collectall(state, depth: int, prefix: list) -> list:
   # Given a compiled dct and state, return a list of all phrases (lists) of exactly a certain length/depth in titlecase
   completedchains = []
-  cstate_model = dct[' '.join(state)].GetValue()
+  cstate_model = dct[' '.join(state)].value
   if not prefix:
     prefix = list(state)
   if depth > 1:
@@ -108,7 +108,7 @@ def traverselikely(mpqueue, state, depthremaining: int, batchdepth: int, prefix:
   # stateweights = [[weight, index], [weight, index]]
   stateweights = []
   # Sort and traverse from at least the most common start-points
-  cstate_model = dct[' '.join(state)].GetValue()
+  cstate_model = dct[' '.join(state)].value
   for i in range(len(cstate_model[1])) :
     if i == 0:
       stateweights.append([cstate_model[1][i], 0])
