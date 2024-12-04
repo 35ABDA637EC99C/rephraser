@@ -1,12 +1,12 @@
 import os
 import sys
+import json
+import argparse
+import multiprocessing as mp
+from signal import signal, SIGINT, SIG_IGN
 import markovify
 import keyvi.compiler
 import keyvi.dictionary
-from signal import signal, SIGINT, SIG_IGN
-import json
-import multiprocessing as mp
-import argparse
 
 BEGIN = '___BEGIN__'
 END = '___END__'
@@ -174,7 +174,7 @@ if __name__ == '__main__':
       keyvicompiler.Compile()
       keyvicompiler.WriteToFile(args.model)
       del keyvicompiler
-      dct = keyvi.dictionary.Dictionary(args.model)
+      dct: dict = keyvi.dictionary.Dictionary(args.model)
     elif os.path.isfile(args.corpus):
       # Load single-file corpus from --corpus
       with open(args.corpus) as f:
@@ -187,12 +187,12 @@ if __name__ == '__main__':
       keyvicompiler.Compile()
       keyvicompiler.WriteToFile(args.model)
       del keyvicompiler
-      dct = keyvi.dictionary.Dictionary(args.model)
+      dct: dict = keyvi.dictionary.Dictionary(args.model)
   elif args.model != '':
     # Load a saved model in a keyvi file
     if os.path.isfile(args.model):
       with open(args.model) as f:
-        dct = keyvi.dictionary.Dictionary(args.model)
+        dct: dict = keyvi.dictionary.Dictionary(args.model)
     else:
       sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')
       sys.exit(1)
@@ -201,9 +201,9 @@ if __name__ == '__main__':
     sys.exit(1)
 
   if args.workers < 1:
-    worker_num  = 1
+    worker_num: int  = 1
   else:
-    worker_num = args.workers
+    worker_num: int = args.workers
 
   mpqueue = mp.Queue(MAXQUEUESIZE)
   # Spin up workers once and early
@@ -263,7 +263,7 @@ if __name__ == '__main__':
         continue
       for tuplekey in freqtuplelist:
         prefix = list(tuplekey)
-        prefixmod = args.ngrams
+        prefixmod: int = args.ngrams
         if tuplekey[0] == BEGIN:
           prefixmod = args.ngrams - 1
           prefix = list(tuplekey[1:])
