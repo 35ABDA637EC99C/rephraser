@@ -12,37 +12,36 @@ BEGIN = '___BEGIN__'
 END = '___END__'
 DONE = '___DONE__'
 undesirable_chars = [',','.',';',':','?','\'','"','“','”','‘','’']
-dct = None # Will contain global mappings for shared memory managed by keyvi
-mpqueue = None # Will contain Queue
+DCT = None # Will contain global mappings for shared memory managed by keyvi
+MPQUEUE = None # Will contain Queue
 MAXQUEUESIZE = 100000 # Number of work items that is reasonable to have on the queue
-worker_num = 0 # Will be changed before creating workers
+WORKER_NUM = 0 # Will be changed before creating workers
 
 def sigint_handler(signal_received, frame) -> None:
-  # Following wrapup might not complete for minutes with 3 workers
-  # for i in range(worker_num):
-  #   if mpqueue:
-  #     mpqueue.put([DONE, DONE, DONE], False)
-  sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. Attempting to exit gracefully...\n')
-  last_work_item = mpqueue.get(block=False)
-  sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
-  # Parent *should* be able to exit
-  exit(0)
+    # Following wrapup might not complete for minutes with 3 workers
+    # for i in range(WORKER_NUM):
+    #   if MPQUEUE:
+    #     MPQUEUE.put([DONE, DONE, DONE], False)
+    sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. Attempting to exit gracefully...\n')
+    last_work_item = MPQUEUE.get(block=False)
+    sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
+    # Parent *should* be able to exit
+    exit(0)
 
 def sanitizeandmutateword(word: str) -> str:
-  if word[0] in undesirable_chars:
-    word = word[1:]
-  if word != '':
-    if word[-1] in undesirable_chars:
-      word = word[0:len(word)-1]
-  if len(word) > 1:
-    return word[0].capitalize() + word[1:] # Preserve rest of case on capitalized acroynms, etc.
-  else:
+    if word[0] in undesirable_chars:
+        word = word[1:]
+    if word != '':
+        if word[-1] in undesirable_chars:
+            word = word[0:len(word)-1]
+    if len(word) > 1:
+        return word[0].capitalize() + word[1:] # Preserve rest of case on capitalized acroynms, etc.
     return word.capitalize()
 
 def collectall(state, depth: int, prefix: list) -> list:
-  # Given a compiled dct and state, return a list of all phrases (lists) of exactly a certain length/depth in titlecase
+  # Given a compiled DCT and state, return a list of all phrases (lists) of exactly a certain length/depth in titlecase
   completedchains = []
-  cstate_model = dct[' '.join(state)].value
+  cstate_model = DCT[' '.join(state)].value
   if not prefix:
     prefix = list(state)
   if depth > 1:
@@ -66,11 +65,11 @@ def collectall(state, depth: int, prefix: list) -> list:
           completedchains.append(mutated_prefix + [mutated_word])
   return completedchains
 
-def workercollectall(mpqueue) -> None:
+def workercollectall(MPQUEUE) -> None:
   # Landing function for workers
   while True:
     try:
-      arglist = mpqueue.get()
+      arglist = MPQUEUE.get()
     except KeyboardInterrupt:
       break
     if len(arglist) == 3:
@@ -104,11 +103,11 @@ def workercollectall(mpqueue) -> None:
           # Camelcase without spaces
           print(f'{outlist[0].lower() + nospace.join(outlist[1:])}')
 
-def traverselikely(mpqueue, state, depthremaining: int, batchdepth: int, prefix: list = None) -> None:
+def traverselikely(MPQUEUE, state, depthremaining: int, batchdepth: int, prefix: list = None) -> None:
   # stateweights = [[weight, index], [weight, index]]
   stateweights = []
   # Sort and traverse from at least the most common start-points
-  cstate_model = dct[' '.join(state)].value
+  cstate_model = DCT[' '.join(state)].value
   for i in range(len(cstate_model[1])) :
     if i == 0:
       stateweights.append([cstate_model[1][i], 0])
@@ -124,15 +123,15 @@ def traverselikely(mpqueue, state, depthremaining: int, batchdepth: int, prefix:
         continue
       nextstate = tuple(state[1:]) + (nextword,)
       # Parallelize below batchdepth
-      mpqueue.put([nextstate, depthremaining - 1, prefix + [nextword]])
+      MPQUEUE.put([nextstate, depthremaining - 1, prefix + [nextword]])
   else:
     for weighted in stateweights:
-      # dct[state][0 = words][wordindex]
+      # DCT[state][0 = words][wordindex]
       nextword = cstate_model[0][weighted[1]]
       if nextword == END:
         continue
       nextstate = tuple(state[1:]) + (nextword,)
-      traverselikely(mpqueue, nextstate, depthremaining - 1, batchdepth, prefix + [nextword])
+      traverselikely(MPQUEUE, nextstate, depthremaining - 1, batchdepth, prefix + [nextword])
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(prog='rephraser.py', 
@@ -154,27 +153,27 @@ if __name__ == '__main__':
   if args.corpus != '' and args.model != '':
     if args.corpusisdir and os.path.isdir(args.corpus):
       # Load multi-file corpus from --corpus
-      combined_model = None
+      COMBINED_MODEL = None
       for (dirpath, _, filenames) in os.walk(args.corpus):
         for filename in filenames:
           sys.stderr.write('[REPHRASER] Loading ' + os.path.join(dirpath, filename) + ' ...')
           with open(os.path.join(dirpath, filename)) as f:
             mmodel = markovify.Text(f, retain_original=False, state_size=args.ngrams)
-            if combined_model:
+            if COMBINED_MODEL:
               sys.stderr.write('[REPHRASER] Combining ' + os.path.join(dirpath, filename) + ' ...')
-              combined_model = markovify.combine(models=[combined_model, mmodel])
+              COMBINED_MODEL = markovify.combine(models=[COMBINED_MODEL, mmodel])
             else:
-              combined_model = mmodel
+              COMBINED_MODEL = mmodel
       del mmodel
-      combined_model.compile(inplace = True)
+      COMBINED_MODEL.compile(inplace = True)
       keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
-      for key in combined_model.chain.model:
-        keyvicompiler.Add(' '.join(key), json.dumps(combined_model.chain.model[key]))
-      del combined_model
+      for key in COMBINED_MODEL.chain.model:
+        keyvicompiler.Add(' '.join(key), json.dumps(COMBINED_MODEL.chain.model[key]))
+      del COMBINED_MODEL
       keyvicompiler.Compile()
       keyvicompiler.WriteToFile(args.model)
       del keyvicompiler
-      dct: dict = keyvi.dictionary.Dictionary(args.model)
+      DCT: dict = keyvi.dictionary.Dictionary(args.model)
     elif os.path.isfile(args.corpus):
       # Load single-file corpus from --corpus
       with open(args.corpus) as f:
@@ -187,12 +186,12 @@ if __name__ == '__main__':
       keyvicompiler.Compile()
       keyvicompiler.WriteToFile(args.model)
       del keyvicompiler
-      dct: dict = keyvi.dictionary.Dictionary(args.model)
+      DCT: dict = keyvi.dictionary.Dictionary(args.model)
   elif args.model != '':
     # Load a saved model in a keyvi file
     if os.path.isfile(args.model):
       with open(args.model) as f:
-        dct: dict = keyvi.dictionary.Dictionary(args.model)
+        DCT: dict = keyvi.dictionary.Dictionary(args.model)
     else:
       sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')
       sys.exit(1)
@@ -201,15 +200,15 @@ if __name__ == '__main__':
     sys.exit(1)
 
   if args.workers < 1:
-    worker_num: int  = 1
+    WORKER_NUM: int  = 1
   else:
-    worker_num: int = args.workers
+    WORKER_NUM: int = args.workers
 
-  mpqueue = mp.Queue(MAXQUEUESIZE)
+  MPQUEUE = mp.Queue(MAXQUEUESIZE)
   # Spin up workers once and early
   worker_processes = []
-  for i in range(worker_num):
-    worker = mp.Process(target=workercollectall, args=((mpqueue),))
+  for i in range(WORKER_NUM):
+    worker = mp.Process(target=workercollectall, args=((MPQUEUE),))
     worker.daemon = True
     worker.start()
     worker_processes.append(worker)
@@ -225,13 +224,13 @@ if __name__ == '__main__':
     else:
       sys.stderr.write('[REPHRASER] Couldn\'t find freqlist at ' + args.freqlist + '\n[REPHRASER] Exiting!\n')
       sys.exit(1)
-    
+
     freqtuplelists = []
     # Create array of arrays to hold keys corresponding to words in freqlist
     for i in freqlist:
       freqtuplelists.append([])
     # Iterate through all markov chain keys, keeping those that are in our freqlist, in the order of freqlist
-    for key in dct.keys():
+    for key in DCT.keys():
       if key == ' '.join((BEGIN,BEGIN)) or key == ' '.join((BEGIN,BEGIN,BEGIN)):
         continue
       if END in key:
@@ -272,16 +271,16 @@ if __name__ == '__main__':
           prefix = list(tuplekey[2:])
         # Handle the common-case where the tuplekey puts us below the batchdepth
         if args.words - prefixmod <= args.batchdepth:
-          mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix])
+          MPQUEUE.put([tuplekey, args.words - prefixmod - 1, prefix])
         else:
-          traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix)
+          traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix)
   else:
     # Iterate on all keys in chain model, handling most likely key (start of sentance) first
     if args.ngrams == 2:
-      traverselikely(mpqueue, (BEGIN,BEGIN), args.words, args.batchdepth, [])
+      traverselikely(MPQUEUE, (BEGIN,BEGIN), args.words, args.batchdepth, [])
     elif args.ngrams == 3:
-      traverselikely(mpqueue, (BEGIN,BEGIN,BEGIN), args.words, args.batchdepth, [])
-    for key in dct.keys():
+      traverselikely(MPQUEUE, (BEGIN,BEGIN,BEGIN), args.words, args.batchdepth, [])
+    for key in DCT.keys():
       if key == ' '.join((BEGIN,BEGIN)) or key == ' '.join((BEGIN,BEGIN,BEGIN)):
         continue
       # Need to convert string keys back into tuples for programmatic use
@@ -298,13 +297,13 @@ if __name__ == '__main__':
         prefix = list(tuplekey[2:])
       # Handle the common-case where the tuplekey puts us below the batchdepth
       if args.words - prefixmod <= args.batchdepth:
-        mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix])
+        MPQUEUE.put([tuplekey, args.words - prefixmod - 1, prefix])
       else:
-        traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix)
+        traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix)
 
   # Wrap up, send end-of-work signals to workers (one each)
   for worker in worker_processes:
-    mpqueue.put([DONE, DONE, DONE])
+    MPQUEUE.put([DONE, DONE, DONE])
 
   sys.stderr.write('\n[REPHRASER] Scheduler work completed! Waiting patiently for workers to finish queued work...\n')
   # Wait for workers to empty queue and hit done signals before killing parent process.
