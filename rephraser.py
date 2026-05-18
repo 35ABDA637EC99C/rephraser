@@ -29,7 +29,7 @@ def sigint_handler(signum: int, frame) -> None:
         last_work_item = mpqueue.get(block=False)
         sys.stderr.write('[REPHRASER] Next prefix in queue was: '
                          f'{repr(last_work_item)[2]}\n')
-    except Exception:
+    except mp.managers.RemoteError:
         pass
     sys.exit(0)
 
@@ -195,7 +195,7 @@ if __name__ == '__main__':
             keyvicompiler.compile()
             keyvicompiler.write_to_file(args.model)
             del keyvicompiler
-            DCT: dict = keyvi.dictionary.Dictionary(args.model)
+            DCT = keyvi.dictionary.Dictionary(args.model)
         elif os.path.isfile(args.corpus):
             # Load single-file corpus from --corpus
             with open(args.corpus, encoding='utf-8') as f:
@@ -208,7 +208,7 @@ if __name__ == '__main__':
             keyvicompiler.compile()
             keyvicompiler.write_to_file(args.model)
             del keyvicompiler
-            DCT: dict = keyvi.dictionary.Dictionary(args.model)
+            DCT = keyvi.dictionary.Dictionary(args.model)
     elif args.model != '':
         # Load a saved model in a keyvi file
         if os.path.isfile(args.model):
@@ -238,7 +238,7 @@ if __name__ == '__main__':
     signal(SIGINT, sigint_handler)
     if args.freqlist != '':
         # Iterate on most-frequently used words input, as long as they in the model
-        freqlist = []
+        freqlist: list[str] = []
         if os.path.isfile(args.freqlist):
             with open(args.freqlist, encoding='utf-8', errors='ignore') as f:
                 freqlist = f.read().split('\n')
