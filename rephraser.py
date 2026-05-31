@@ -8,9 +8,9 @@ import argparse
 import multiprocessing as mp
 from signal import signal, SIGINT
 from typing import Optional
-import markovify
-import keyvi.compiler
-import keyvi.dictionary
+import markovify  # type: ignore
+import keyvi.compiler # type: ignore
+import keyvi.dictionary # type: ignore
 
 BEGIN = '___BEGIN__'
 END = '___END__'
@@ -22,14 +22,14 @@ mpqueue: Optional[mp.Queue] = None # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
 
-def sigint_handler(signum: int, frame) -> None:
+def sigint_handler() -> None:
     """Handle any cleanup here, and exit gracefully"""
     sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. '
                      'Attempting to exit gracefully...\n')
     try:
-        last_work_item = mpqueue.get(block=False)
-        sys.stderr.write('[REPHRASER] Next prefix in queue was: '
-                         f'{repr(last_work_item)[2]}\n')
+        if mpqueue is not None:
+            last_work_item = mpqueue.get(block=False)
+            sys.stderr.write('[REPHRASER] Next prefix in queue was: 'f'{repr(last_work_item)[2]}\n')
     except mp.managers.RemoteError:
         pass
     sys.exit(0)
@@ -116,6 +116,10 @@ def traverselikely(mpqueue: mp.Queue, state: tuple, depthremaining: int, batchde
     # stateweights = [[weight, index], [weight, index]]
     stateweights: list[list[int]] = []
     # Sort and traverse from at least the most common start-points
+    if func_prefix is None:
+        func_prefix = []
+    if DCT is None:
+        return
     cstate_model = DCT[' '.join(state)].value
     for weights in range(len(cstate_model[1])):
         if weights == 0:
