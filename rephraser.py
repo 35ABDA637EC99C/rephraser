@@ -7,7 +7,6 @@ import json
 import argparse
 import multiprocessing as mp
 from signal import signal, SIGINT
-from typing import Optional
 import markovify
 import keyvi.compiler
 import keyvi.dictionary
@@ -17,8 +16,8 @@ END = '___END__'
 DONE = '___DONE__'
 undesirable_chars = [',', '.', ';', ':', '?', '\'', '"', '`', '']
 
-DCT: Optional[dict] = None  # Global mappings for shared memory managed by keyvi
-mpqueue = None  # Work queue
+DCT: dict | None = None  # Global mappings for shared memory managed by keyvi
+mpqueue: mp.Queue | None = None  # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
 
@@ -27,7 +26,7 @@ def sigint_handler(signum: int, frame) -> None:
     sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. '
                      'Attempting to exit gracefully...\n')
     try:
-        last_work_item = mpqueue.get(block=False)
+        last_work_item = MPQUEUE.get(block=False)
         sys.stderr.write('[REPHRASER] Next prefix in queue was: '
                          f'{repr(last_work_item)[2]}\n')
     except mp.managers.RemoteError:
@@ -35,6 +34,7 @@ def sigint_handler(signum: int, frame) -> None:
     sys.exit(0)
 
 def sanitizeandmutateword(word: str) -> str:
+    """Remove undesirable characters from the start and end of a word, and capitalize the first letter"""
     if word[0] in undesirable_chars:
         word = word[1:]
     if word != '':
@@ -55,7 +55,7 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
     if depth > 1:
         for nextword in cstate_model[0]:
             if nextword != END:
-                nextstate = tuple(state[1:]) + (nextword,)
+                nextstate = list(state[1:]) + [nextword]
                 nextreach = collectall(nextstate, depth - 1, func_prefix + [nextword])
                 if nextreach:
                     completedchains += nextreach
@@ -71,7 +71,8 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
                     completedchains.append(mutated_prefix + [mutated_word])
     return completedchains
 
-def workercollectall(MPQUEUE: mp.Queue, ARGS) -> None:
+def workercollectall(MPQUEUE: mp.Queue) -> None:
+    """Worker function to collect all chains of a certain depth, and output them in titlecase"""
     # Landing function for workers
     while True:
         try:
@@ -86,7 +87,7 @@ def workercollectall(MPQUEUE: mp.Queue, ARGS) -> None:
             # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
             space = " "
             nospace = ""
-            if not ARGS.gpusaturated:
+            if not args.gpusaturated:
                 for outlist in outchains:
                     # Titlecase with spaces
                     print(f'{space.join(outlist)}')
@@ -109,7 +110,8 @@ def workercollectall(MPQUEUE: mp.Queue, ARGS) -> None:
                     # Camelcase without spaces
                     print(f'{outlist[0].lower() + nospace.join(outlist[1:])}')
 
-def traverselikely(MPQUEUE: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list = None) -> None:
+def traverselikely(mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list | None = None) -> None:
+    """Traverse the Markov model in order of most likely next word, until a certain depth, at which point put work on the queue for workers to handle in bulk"""
     # stateweights = [[weight, index], [weight, index]]
     stateweights: list[list[int]] = []
     # Sort and traverse from at least the most common start-points
@@ -129,7 +131,7 @@ def traverselikely(MPQUEUE: mp.Queue, state: tuple, depthremaining: int, batchde
                 continue
             nextstate = tuple(state[1:]) + (nextword,)
             # Parallelize below batchdepth
-            MPQUEUE.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
+            mpqueue.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
     else:
         for weighted in stateweights:
             # DCT[state][0 = words][wordindex]
@@ -227,11 +229,10 @@ if __name__ == '__main__':
         WORKER_NUM: int = args.workers
 
     MPQUEUE = mp.Queue(MAXQUEUESIZE)
-    mpqueue = MPQUEUE  # Assign to global for sigint_handler
     # Spin up workers once and early
     worker_processes = []
     for i in range(WORKER_NUM):
-        worker = mp.Process(target=workercollectall, args=((MPQUEUE, args),))
+        worker = mp.Process(target=workercollectall, args=((MPQUEUE),))
         worker.daemon = True
         worker.start()
         worker_processes.append(worker)
