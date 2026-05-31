@@ -7,6 +7,7 @@ import json
 import argparse
 import multiprocessing as mp
 from signal import signal, SIGINT
+from typing import Optional
 import markovify
 import keyvi.compiler
 import keyvi.dictionary
@@ -16,8 +17,8 @@ END = '___END__'
 DONE = '___DONE__'
 undesirable_chars = [',', '.', ';', ':', '?', '\'', '"', '`', '']
 
-DCT: dict | None = None  # Global mappings for shared memory managed by keyvi
-mpqueue: mp.Queue | None = None  # Work queue
+DCT: Optional[dict] = None  # Global mappings for shared memory managed by keyvi
+mpqueue = None  # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
 
@@ -70,7 +71,7 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
                     completedchains.append(mutated_prefix + [mutated_word])
     return completedchains
 
-def workercollectall(MPQUEUE: mp.Queue) -> None:
+def workercollectall(MPQUEUE: mp.Queue, ARGS) -> None:
     # Landing function for workers
     while True:
         try:
@@ -85,7 +86,7 @@ def workercollectall(MPQUEUE: mp.Queue) -> None:
             # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
             space = " "
             nospace = ""
-            if not args.gpusaturated:
+            if not ARGS.gpusaturated:
                 for outlist in outchains:
                     # Titlecase with spaces
                     print(f'{space.join(outlist)}')
@@ -226,10 +227,11 @@ if __name__ == '__main__':
         WORKER_NUM: int = args.workers
 
     MPQUEUE = mp.Queue(MAXQUEUESIZE)
+    mpqueue = MPQUEUE  # Assign to global for sigint_handler
     # Spin up workers once and early
     worker_processes = []
     for i in range(WORKER_NUM):
-        worker = mp.Process(target=workercollectall, args=((MPQUEUE),))
+        worker = mp.Process(target=workercollectall, args=((MPQUEUE, args),))
         worker.daemon = True
         worker.start()
         worker_processes.append(worker)
