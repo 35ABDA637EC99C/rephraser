@@ -7,6 +7,7 @@ import json
 import argparse
 import multiprocessing as mp
 from signal import signal, SIGINT
+from typing import Optional
 import markovify
 import keyvi.compiler
 import keyvi.dictionary
@@ -16,8 +17,8 @@ END = '___END__'
 DONE = '___DONE__'
 undesirable_chars = [',', '.', ';', ':', '?', '\'', '"', '`', '']
 
-DCT: dict | None = None  # Global mappings for shared memory managed by keyvi
-mpqueue: mp.Queue | None = None  # Work queue
+DCT: Optional[dict] = None  # Global mappings for shared memory managed by keyvi
+mpqueue: Optional[mp.Queue] = None # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
 
@@ -26,7 +27,7 @@ def sigint_handler(signum: int, frame) -> None:
     sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. '
                      'Attempting to exit gracefully...\n')
     try:
-        last_work_item = MPQUEUE.get(block=False)
+        last_work_item = mpqueue.get(block=False)
         sys.stderr.write('[REPHRASER] Next prefix in queue was: '
                          f'{repr(last_work_item)[2]}\n')
     except mp.managers.RemoteError:
@@ -110,7 +111,7 @@ def workercollectall(MPQUEUE: mp.Queue) -> None:
                     # Camelcase without spaces
                     print(f'{outlist[0].lower() + nospace.join(outlist[1:])}')
 
-def traverselikely(mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list | None = None) -> None:
+def traverselikely(mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: Optional[list] = None) -> None:
     """Traverse the Markov model in order of most likely next word, until a certain depth, at which point put work on the queue for workers to handle in bulk"""
     # stateweights = [[weight, index], [weight, index]]
     stateweights: list[list[int]] = []
