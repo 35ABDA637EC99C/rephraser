@@ -72,12 +72,16 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
                     completedchains.append(mutated_prefix + [mutated_word])
     return completedchains
 
-def workercollectall(MPQUEUE: mp.Queue) -> None:
+def workercollectall(func_mpqueue: mp.Queue) -> None:
     """Worker function to collect all chains of a certain depth, and output them in titlecase"""
+    if args.gpusaturated:
+        use_simplejoin = True
+    else:
+        use_simplejoin = False
     # Landing function for workers
     while True:
         try:
-            arglist = MPQUEUE.get()
+            arglist = func_mpqueue.get()
         except KeyboardInterrupt:
             break
         if len(arglist) == 3:
@@ -88,7 +92,7 @@ def workercollectall(MPQUEUE: mp.Queue) -> None:
             # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
             space = " "
             nospace = ""
-            if not args.gpusaturated:
+            if use_simplejoin:
                 for outlist in outchains:
                     # Titlecase with spaces
                     print(f'{space.join(outlist)}')
@@ -111,7 +115,7 @@ def workercollectall(MPQUEUE: mp.Queue) -> None:
                     # Camelcase without spaces
                     print(f'{outlist[0].lower() + nospace.join(outlist[1:])}')
 
-def traverselikely(mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: Optional[list] = None) -> None:
+def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: Optional[list] = None) -> None:
     """Traverse the Markov model in order of most likely next word, until a certain depth, at which point put work on the queue for workers to handle in bulk"""
     # stateweights = [[weight, index], [weight, index]]
     stateweights: list[list[int]] = []
@@ -136,7 +140,7 @@ def traverselikely(mpqueue: mp.Queue, state: tuple, depthremaining: int, batchde
                 continue
             nextstate = tuple(state[1:]) + (nextword,)
             # Parallelize below batchdepth
-            mpqueue.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
+            func_mpqueue.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
     else:
         for weighted in stateweights:
             # DCT[state][0 = words][wordindex]
@@ -144,7 +148,7 @@ def traverselikely(mpqueue: mp.Queue, state: tuple, depthremaining: int, batchde
             if nextword == END:
                 continue
             nextstate = tuple(state[1:]) + (nextword,)
-            traverselikely(MPQUEUE, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
+            traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='rephraser.py',
@@ -195,6 +199,9 @@ if __name__ == '__main__':
                         else:
                             COMBINED_MODEL = mmodel
             del mmodel
+            if COMBINED_MODEL is None:
+                sys.stderr.write('[REPHRASER] No files found in directory ' + args.corpus + ' Exiting!\n')
+                sys.exit(1)
             COMBINED_MODEL.compile(inplace=True)
             keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
             for key in COMBINED_MODEL.chain.model:
@@ -231,9 +238,9 @@ if __name__ == '__main__':
     if args.workers < 1:
         WORKER_NUM: int = 1
     else:
-        WORKER_NUM: int = args.workers
+        WORKER_NUM = args.workers
 
-    MPQUEUE = mp.Queue(MAXQUEUESIZE)
+    MPQUEUE: mp.Queue = mp.Queue(MAXQUEUESIZE)
     # Spin up workers once and early
     worker_processes = []
     for i in range(WORKER_NUM):
@@ -256,7 +263,7 @@ if __name__ == '__main__':
 
         freqtuplelists: list[list[tuple]] = []
         # Create array of arrays to hold keys corresponding to words in freqlist
-        for i in freqlist:
+        for freq in freqlist:
             freqtuplelists.append([])
         # Iterate through all markov chain keys, keeping those that are in our freqlist, in the order of freqlist
         for key in DCT.keys():
