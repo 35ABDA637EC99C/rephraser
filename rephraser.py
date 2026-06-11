@@ -6,7 +6,6 @@ import sys
 import json
 import argparse
 import multiprocessing as mp
-from signal import signal, SIGINT
 from typing import Optional
 import markovify  # type: ignore
 import keyvi.compiler # type: ignore
@@ -17,10 +16,11 @@ END = '___END__'
 DONE = '___DONE__'
 undesirable_chars = [',', '.', ';', ':', '?', '\'', '"', '`', '']
 
-DCT: Optional[dict] = None  # Global mappings for shared memory managed by keyvi
+DCT: Optional[dict] = {}  # Global mappings for shared memory managed by keyvi
 mpqueue: Optional[mp.Queue] = None # Work queue
-MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
-worker_num = 0  # Will be changed before creating workers
+MAXQUEUESIZE: int = 100000  # Number of work items reasonable to have on queue
+worker_num: int = 0  # Will be changed before creating workers
+GPUSATURATED: bool = False  # Whether to create "Basic8" permutations in CPU workers, usually nets a little extra performance on fast hashes when hashcat is liable to be saturated with work
 
 def sigint_handler() -> None:
     """Handle any cleanup here, and exit gracefully"""
@@ -50,6 +50,9 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
     Given a compiled DCT and state, return a list of all phrases (lists) of exactly a certain length/depth in titlecase
     """
     completedchains = []
+    if DCT is None:
+        raise RuntimeError("DCT is not initialized")
+
     cstate_model = DCT[' '.join(state)].value
     if not func_prefix:
         func_prefix = list(state)
@@ -72,12 +75,8 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
                     completedchains.append(mutated_prefix + [mutated_word])
     return completedchains
 
-def workercollectall(func_mpqueue: mp.Queue) -> None:
+def workercollectall(func_mpqueue: mp.Queue, use_simplejoin: bool = False) -> None:
     """Worker function to collect all chains of a certain depth, and output them in titlecase"""
-    if args.gpusaturated:
-        use_simplejoin = True
-    else:
-        use_simplejoin = False
     # Landing function for workers
     while True:
         try:
@@ -218,7 +217,7 @@ if __name__ == '__main__':
             mmodel.compile(inplace=True)
             keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
             for key in mmodel.chain.model:
-                keyvicompiler.add(' '.join(key), json.dumps(mmodel.chain.model[key]))
+                keyvicompiler.Add(' '.join(key), json.dumps(mmodel.chain.model[key]))
             del mmodel
             keyvicompiler.compile()
             keyvicompiler.write_to_file(args.model)
@@ -241,16 +240,18 @@ if __name__ == '__main__':
         WORKER_NUM = args.workers
 
     MPQUEUE: mp.Queue = mp.Queue(MAXQUEUESIZE)
+    if args.gpusaturated:
+        GPUSATURATED = True
     # Spin up workers once and early
     worker_processes = []
     for i in range(WORKER_NUM):
-        worker = mp.Process(target=workercollectall, args=((MPQUEUE),))
+        worker = mp.Process(target=workercollectall, args=((MPQUEUE), GPUSATURATED))
         worker.daemon = True
         worker.start()
         worker_processes.append(worker)
 
     # Change signal handling in only parent
-    signal(SIGINT, sigint_handler)
+    
     if args.freqlist != '':
         # Iterate on most-frequently used words input, as long as they in the model
         freqlist: list[str] = []
@@ -266,6 +267,8 @@ if __name__ == '__main__':
         for freq in freqlist:
             freqtuplelists.append([])
         # Iterate through all markov chain keys, keeping those that are in our freqlist, in the order of freqlist
+        if DCT is None:
+            raise RuntimeError("DCT is not initialized")
         for key in DCT.keys():
             if key == ' '.join((BEGIN, BEGIN)) or key == ' '.join((BEGIN, BEGIN, BEGIN)):
                 continue
@@ -297,25 +300,27 @@ if __name__ == '__main__':
             if not freqtuplelist:
                 continue
             for tuplekey in freqtuplelist:
-                prefix = list(tuplekey)
+                prefix_normal = list(tuplekey)
                 prefixmod: int = args.ngrams
                 if tuplekey[0] == BEGIN:
                     prefixmod = args.ngrams - 1
-                    prefix = list(tuplekey[1:])
+                    prefix_normal = list(tuplekey[1:])
                 if tuplekey[1] == BEGIN and args.ngrams > 2:
                     prefixmod = args.ngrams - 2
-                    prefix = list(tuplekey[2:])
+                    prefix_normal = list(tuplekey[2:])
                 # Handle the common-case where the tuplekey puts us below the batchdepth
                 if args.words - prefixmod <= args.batchdepth:
-                    MPQUEUE.put([tuplekey, args.words - prefixmod - 1, prefix])
+                    MPQUEUE.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
                 else:
-                    traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix)
+                    traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
     else:
         # Iterate on all keys in chain model, handling most likely key (start of sentence) first
         if args.ngrams == 2:
             traverselikely(MPQUEUE, (BEGIN, BEGIN), args.words, args.batchdepth, [])
         elif args.ngrams == 3:
             traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
+        if DCT is None:
+            raise RuntimeError("DCT is not initialized")    
         for key in DCT.keys():
             if key == ' '.join((BEGIN, BEGIN)) or key == ' '.join((BEGIN, BEGIN, BEGIN)):
                 continue
@@ -323,19 +328,19 @@ if __name__ == '__main__':
             tuplekey = tuple(key.split(' ', args.ngrams - 1))
             if END in tuplekey:
                 continue
-            prefix = list(tuplekey)
+            prefix_normal = list(tuplekey)
             prefixmod = args.ngrams
             if tuplekey[0] == BEGIN:
                 prefixmod = args.ngrams - 1
-                prefix = list(tuplekey[1:])
+                prefix_normal = list(tuplekey[1:])
             if tuplekey[1] == BEGIN and args.ngrams > 2:
                 prefixmod = args.ngrams - 2
-                prefix = list(tuplekey[2:])
+                prefix_normal = list(tuplekey[2:])
             # Handle the common-case where the tuplekey puts us below the batchdepth
             if args.words - prefixmod <= args.batchdepth:
-                MPQUEUE.put([tuplekey, args.words - prefixmod - 1, prefix])
+                MPQUEUE.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
             else:
-                traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix)
+                traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
 
     # Wrap up, send end-of-work signals to workers (one each)
     for worker in worker_processes:
