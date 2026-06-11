@@ -35,7 +35,9 @@ def sigint_handler() -> None:
     sys.exit(0)
 
 def sanitizeandmutateword(word: str) -> str:
-    """Remove undesirable characters from the start and end of a word, and capitalize the first letter"""
+    """
+    Remove undesirable characters from the start and end of a word, and capitalize the first letter
+    """
     if word[0] in undesirable_chars:
         word = word[1:]
     if word != '':
@@ -69,7 +71,7 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
         for word in func_prefix:
             mutated_prefix.append(sanitizeandmutateword(word))
         for nextword in cstate_model[0]:
-            if nextword != END and nextword != '':
+            if nextword not in [END, '']:
                 mutated_word = sanitizeandmutateword(nextword)
                 if mutated_word != '':
                     completedchains.append(mutated_prefix + [mutated_word])
@@ -89,30 +91,30 @@ def workercollectall(func_mpqueue: mp.Queue, use_simplejoin: bool = False) -> No
                 break
             outchains = collectall(state, depth, prefix)
             # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
-            space = " "
-            nospace = ""
+            space: str = " "
+            nospace: str = ""
             if use_simplejoin:
                 for outlist in outchains:
                     # Titlecase with spaces
-                    print(f'{space.join(outlist)}')
+                    sys.stdout.write(f'{space.join(outlist)}\n')
             else:
                 for outlist in outchains:
                     # Titlecase with spaces
-                    print(f'{space.join(outlist)}')
+                    sys.stdout.write(f'{space.join(outlist)}\n')
                     # Titlecase without spaces
-                    print(f'{nospace.join(outlist)}')
+                    sys.stdout.write(f'{nospace.join(outlist)}\n')
                     # Lowercase with spaces
-                    print(f'{space.join(outlist).lower()}')
+                    sys.stdout.write(f'{space.join(outlist).lower()}\n')
                     # Lowercase without spaces
-                    print(f'{nospace.join(outlist).lower()}')
+                    sys.stdout.write(f'{nospace.join(outlist).lower()}\n')
                     # First letter capitalized with spaces
-                    print(f'{outlist[0].capitalize() + space + space.join(outlist[1:]).lower()}')
+                    sys.stdout.write(f'{outlist[0].capitalize() + space + space.join(outlist[1:]).lower()}\n')
                     # First letter capitalized without spaces
-                    print(f'{outlist[0].capitalize() + nospace.join(outlist[1:]).lower()}')
+                    sys.stdout.write(f'{outlist[0].capitalize() + nospace.join(outlist[1:]).lower()}\n')
                     # Camelcase with spaces
-                    print(f'{outlist[0].lower() + space + space.join(outlist[1:])}')
+                    sys.stdout.write(f'{outlist[0].lower() + space + space.join(outlist[1:])}\n')
                     # Camelcase without spaces
-                    print(f'{outlist[0].lower() + nospace.join(outlist[1:])}')
+                    sys.stdout.write(f'{outlist[0].lower() + nospace.join(outlist[1:])}\n')
 
 def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: Optional[list] = None) -> None:
     """Traverse the Markov model in order of most likely next word, until a certain depth, at which point put work on the queue for workers to handle in bulk"""
@@ -169,7 +171,7 @@ if __name__ == '__main__':
                         help='Number of words in outputtable candidates', default=4)
     parser.add_argument('--workers', '-x', type=int,
                         help='Manually specify the number of workers',
-                        default=(mp.cpu_count() - 1))
+                        default=mp.cpu_count() - 1)
     parser.add_argument('--freqlist', '-f',
                         help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words), to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find all chain start-points (in order) depending on model * freqlist size.',
                         default='')
@@ -251,7 +253,6 @@ if __name__ == '__main__':
         worker_processes.append(worker)
 
     # Change signal handling in only parent
-    
     if args.freqlist != '':
         # Iterate on most-frequently used words input, as long as they in the model
         freqlist: list[str] = []
@@ -320,7 +321,7 @@ if __name__ == '__main__':
         elif args.ngrams == 3:
             traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
         if DCT is None:
-            raise RuntimeError("DCT is not initialized")    
+            raise RuntimeError("DCT is not initialized")
         for key in DCT.keys():
             if key == ' '.join((BEGIN, BEGIN)) or key == ' '.join((BEGIN, BEGIN, BEGIN)):
                 continue
