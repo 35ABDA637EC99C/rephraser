@@ -14,44 +14,27 @@ import keyvi.dictionary # type: ignore
 BEGIN = '___BEGIN__'
 END = '___END__'
 DONE = '___DONE__'
-undesirable_chars = [',', '.', ';', ':', '?', '\'', '"', '`', '']
 
 DCT: Optional[dict] = {}  # Global mappings for shared memory managed by keyvi
 mpqueue: Optional[mp.Queue] = None # Work queue
 MAXQUEUESIZE: int = 100000  # Number of work items reasonable to have on queue
-worker_num: int = 0  # Will be changed before creating workers
-GPUSATURATED: bool = False  # Whether to create "Basic8" permutations in CPU workers, usually nets a little extra performance on fast hashes when hashcat is liable to be saturated with work
-
-def sigint_handler() -> None:
-    """Handle any cleanup here, and exit gracefully"""
-    sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. '
-                     'Attempting to exit gracefully...\n')
-    try:
-        if mpqueue is not None:
-            last_work_item = mpqueue.get(block=False)
-            sys.stderr.write('[REPHRASER] Next prefix in queue was: 'f'{repr(last_work_item)[2]}\n')
-    except mp.managers.RemoteError:
-        pass
-    sys.exit(0)
 
 def sanitizeandmutateword(word: str) -> str:
     """
-    Remove undesirable characters from the start and end of a word, and capitalize the first letter
+    Capitalize the first letter
     """
-    if word[0] in undesirable_chars:
-        word = word[1:]
-    if word != '':
-        if word[-1] in undesirable_chars:
-            word = word[0:len(word)-1]
-    if len(word) > 1:
-        return word[0].capitalize() + word[1:]  # Preserve rest of case on capitalized acronyms, etc.
+    wordlength: int = len(word)
+    firstchar: str = word[0]
+    restofword: str = word[1:]
+    if wordlength > 1:
+        return firstchar.capitalize() + restofword  # Preserve rest of case on capitalized acronyms
     return word.capitalize()
 
 def collectall(state: list, depth: int, func_prefix: list) -> list:
     """
     Given a compiled DCT and state, return a list of all phrases (lists) of exactly a certain length/depth in titlecase
     """
-    completedchains = []
+    completedchains: list[list[str]] = []
     if DCT is None:
         raise RuntimeError("DCT is not initialized")
 
@@ -67,7 +50,7 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
                     completedchains += nextreach
     else:
         # fix-up prefix words outside of loop because they won't need to be passed further
-        mutated_prefix = []
+        mutated_prefix: list[str] = []
         for word in func_prefix:
             mutated_prefix.append(sanitizeandmutateword(word))
         for nextword in cstate_model[0]:
@@ -89,7 +72,7 @@ def workercollectall(func_mpqueue: mp.Queue, use_simplejoin: bool = False) -> No
             state, depth, prefix = arglist
             if state == DONE:
                 break
-            outchains = collectall(state, depth, prefix)
+            outchains: list[list[str]] = collectall(state, depth, prefix)
             # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
             space: str = " "
             nospace: str = ""
@@ -97,6 +80,8 @@ def workercollectall(func_mpqueue: mp.Queue, use_simplejoin: bool = False) -> No
                 for outlist in outchains:
                     # Titlecase with spaces
                     sys.stdout.write(f'{space.join(outlist)}\n')
+                    # Titlecase without spaces
+                    sys.stdout.write(f'{nospace.join(outlist)}\n')
             else:
                 for outlist in outchains:
                     # Titlecase with spaces
@@ -117,7 +102,10 @@ def workercollectall(func_mpqueue: mp.Queue, use_simplejoin: bool = False) -> No
                     sys.stdout.write(f'{outlist[0].lower() + nospace.join(outlist[1:])}\n')
 
 def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: Optional[list] = None) -> None:
-    """Traverse the Markov model in order of most likely next word, until a certain depth, at which point put work on the queue for workers to handle in bulk"""
+    """
+    Traverse the Markov model in order of most likely next word,
+    until a certain depth, at which point put work on the queue for workers to handle in bulk
+    """
     # stateweights = [[weight, index], [weight, index]]
     stateweights: list[list[int]] = []
     # Sort and traverse from at least the most common start-points
@@ -159,7 +147,9 @@ if __name__ == '__main__':
                         help='Path to a saved model (make sure to set --ngrams if using 3grams) or where to save the model generated',
                         default='')
     parser.add_argument('--ngrams', '-g', type=int,
-                        help='Number of words (n-grams) that make up a state in the Markov model, it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM, and 3 for the better linguistic accuracy',
+                        help='Number of words (n-grams) that make up a state in the Markov model,' \
+                        ' it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM,'
+                        ' and 3 for the better linguistic accuracy',
                         choices=[2, 3], default=2)
     parser.add_argument('--corpus', '-c',
                         help='Path to a corpus (file with sentences) to convert into a Markov model',
@@ -173,10 +163,14 @@ if __name__ == '__main__':
                         help='Manually specify the number of workers',
                         default=mp.cpu_count() - 1)
     parser.add_argument('--freqlist', '-f',
-                        help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words), to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find all chain start-points (in order) depending on model * freqlist size.',
+                        help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words),' \
+                        ' to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find' \
+                        ' all chain start-points (in order) depending on model * freqlist size.',
                         default='')
     parser.add_argument('--gpusaturated', '-s', action='store_true',
-                        help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes',
+                        help='If hashcat is liable to be saturated with work,' \
+                        ' create "Basic8" permutations in the CPU workers,' \
+                        ' usually nets a little extra performance on fast hashes',
                         default=False)
     parser.add_argument('--batchdepth', '-b', type=int,
                         help='Number of ending words/recursions that should be handled in bulk by performing "collectall"',
@@ -242,8 +236,7 @@ if __name__ == '__main__':
         WORKER_NUM = args.workers
 
     MPQUEUE: mp.Queue = mp.Queue(MAXQUEUESIZE)
-    if args.gpusaturated:
-        GPUSATURATED = True
+    GPUSATURATED = args.gpusaturated # Whether to create "Basic8" permutations in CPU workers
     # Spin up workers once and early
     worker_processes = []
     for i in range(WORKER_NUM):
