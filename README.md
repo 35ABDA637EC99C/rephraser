@@ -1,18 +1,5 @@
 ### RePhraser
 
-#### A Python-based reimagining of [Phraser](https://github.com/Sparell/Phraser) using Markov-chains for linguistically-correct password cracking.
-
-In its current state, it is easily able to kick out more than 3 million candidates per second on a modern quadcore CPU.
-In terms of hit rate, combined with the `travco_princev8.rule` a single GPU was able to crack 
-45 passwords otherwise-uncracked in any other attack in under an hour. But you know, definitely is still in development. :)
-
-The purpose and idea behind linguistic cracking is that people forced to adhere to long password requirements (e.g. 15 character
- minimum) commonly create passphrases of words that are related. More specifically words that are in a logical order,
- often times choosing sentences or sentence fragments.
-By training a model to observe what words generally follow other words in source text, one can produce candidates that make
- some amount of linguistic sense and better mimic human choices. Drastically lowering the number of possible choices, and the
- amount of time it takes to crack four and five word phrases, not to mention making *even longer* phrases feasible to enumerate.
-
 #### Usage:
 
 As with most sane programs, `python3 rephraser.py -h` will list arguments it can take.
@@ -54,7 +41,7 @@ Can be easy to remember if you say them to yourself "A diabetic-unicorn is trapp
 	 - [cmake](https://gitlab.kitware.com/cmake/cmake)  (apt package usually is `cmake`)
 		 - [libboost](https://gitlab.kitware.com/cmake/cmake/issues/19402) (apt package usually is `libboost-all-dev`)
 	 - [snappy](https://github.com/google/snappy) (apt package usually is `libsnappy-dev`)
-- **Python 3.5+** is strongly recommended (keyvi dropped support for Python 2.7 and 3.4)
+- **Python 3.9+** 
 
 #### Other files in this repo:
 - `rephraserBasic8.rule` Eight rules to alter rephraser's output into different common patterns of capitalization and spaces within hashcat
