@@ -1,3 +1,9 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["keyvi", "markovify"]
+# ///
+
 """
 Fork from https://github.com/travco/rephraser
 """
