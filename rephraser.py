@@ -219,10 +219,10 @@ if __name__ == '__main__':
             mmodel.compile(inplace=True)
             keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
             for key in mmodel.chain.model:
-                keyvicompiler.add(' '.join(key), json.dumps(mmodel.chain.model[key]))
+                keyvicompiler.Add(' '.join(key), json.dumps(mmodel.chain.model[key]))
             del mmodel
-            keyvicompiler.compile()
-            keyvicompiler.write_to_file(args.model)
+            keyvicompiler.Compile()
+            keyvicompiler.WriteToFile(args.model)
             del keyvicompiler
             DCT = keyvi.dictionary.Dictionary(args.model)
     elif args.model != '':
