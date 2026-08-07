@@ -1,5 +1,5 @@
 #!/usr/bin/env -S uv run --script
-# /// script
+# /// script  # noqa: EXE001
 # requires-python = ">=3.12"
 # dependencies = ["keyvi", "markovify"]
 # ///
@@ -7,22 +7,22 @@
 """
 Fork from https://github.com/travco/rephraser
 """
+import argparse
+import json
+import multiprocessing as mp
 import os
 import sys
-import json
-import argparse
-import multiprocessing as mp
-from typing import Optional
+
+import keyvi.compiler  # type: ignore
+import keyvi.dictionary  # type: ignore
 import markovify  # type: ignore
-import keyvi.compiler # type: ignore
-import keyvi.dictionary # type: ignore
 
 BEGIN = '___BEGIN__'
 END = '___END__'
 DONE = '___DONE__'
 
-DCT: Optional[dict] = {}  # Global mappings for shared memory managed by keyvi
-mpqueue: Optional[mp.Queue] = None # Work queue
+DCT: dict | None = {}  # Global mappings for shared memory managed by keyvi
+mpqueue: mp.Queue | None = None # Work queue
 MAXQUEUESIZE: int = 100000  # Number of work items reasonable to have on queue
 
 def sanitizeandmutateword(word: str) -> str:
@@ -107,7 +107,7 @@ def workercollectall(func_mpqueue: mp.Queue, use_simplejoin: bool = False) -> No
                     # Camelcase without spaces
                     sys.stdout.write(f'{outlist[0].lower() + nospace.join(outlist[1:])}\n')
 
-def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: Optional[list] = None) -> None:
+def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list | None = None) -> None:
     """
     Traverse the Markov model in order of most likely next word,
     until a certain depth, at which point put work on the queue for workers to handle in bulk
@@ -269,8 +269,8 @@ if __name__ == '__main__':
         # Iterate through all markov chain keys, keeping those that are in our freqlist, in the order of freqlist
         if DCT is None:
             raise RuntimeError("DCT is not initialized")
-        for key in DCT.keys():
-            if key == ' '.join((BEGIN, BEGIN)) or key == ' '.join((BEGIN, BEGIN, BEGIN)):
+        for key in DCT:
+            if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
                 continue
             if END in key:
                 continue
@@ -321,8 +321,8 @@ if __name__ == '__main__':
             traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
         if DCT is None:
             raise RuntimeError("DCT is not initialized")
-        for key in DCT.keys():
-            if key == ' '.join((BEGIN, BEGIN)) or key == ' '.join((BEGIN, BEGIN, BEGIN)):
+        for key in DCT:
+            if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
                 continue
             # Need to convert string keys back into tuples for programmatic use
             tuplekey = tuple(key.split(' ', args.ngrams - 1))
