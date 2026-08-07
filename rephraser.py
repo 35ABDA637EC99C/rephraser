@@ -146,41 +146,16 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='rephraser.py',
-        description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--model', '-m', required=True,
-                        help='Path to a saved model (make sure to set --ngrams if using 3grams) or where to save the model generated',
-                        default='')
-    parser.add_argument('--ngrams', '-g', type=int,
-                        help='Number of words (n-grams) that make up a state in the Markov model,' \
-                        ' it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM,'
-                        ' and 3 for the better linguistic accuracy',
-                        choices=[2, 3], default=2)
-    parser.add_argument('--corpus', '-c',
-                        help='Path to a corpus (file with sentences) to convert into a Markov model',
-                        default='')
-    parser.add_argument('--corpusisdir','-d', action='store_true',
-                        help='Handle the "--corpus" path as a directory, and create a model by walking all files inside',
-                        default=False)
-    parser.add_argument('--words', '-w', type=int,
-                        help='Number of words in outputtable candidates', default=4)
-    parser.add_argument('--workers', '-x', type=int,
-                        help='Manually specify the number of workers',
-                        default=mp.cpu_count() - 1)
-    parser.add_argument('--freqlist', '-f',
-                        help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words),' \
-                        ' to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find' \
-                        ' all chain start-points (in order) depending on model * freqlist size.',
-                        default='')
-    parser.add_argument('--gpusaturated', '-s', action='store_true',
-                        help='If hashcat is liable to be saturated with work,' \
-                        ' create "Basic8" permutations in the CPU workers,' \
-                        ' usually nets a little extra performance on fast hashes',
-                        default=False)
-    parser.add_argument('--batchdepth', '-b', type=int,
-                        help='Number of ending words/recursions that should be handled in bulk by performing "collectall"',
-                        default=3)
+    parser = argparse.ArgumentParser(prog='rephraser.py', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--model', '-m', required=True, help='Path to a saved model (make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
+    parser.add_argument('--ngrams', '-g', type=int, help='Number of words (n-grams) that make up a state in the Markov model, it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM, and 3 for the better linguistic accuracy', choices=[2, 3], default=2)
+    parser.add_argument('--corpus', '-c', help='Path to a corpus (file with sentences) to convert into a Markov model', default='')
+    parser.add_argument('--corpusisdir', '-d', action='store_true', help='Handle the "--corpus" path as a directory, and create a model by walking all files inside', default=False)
+    parser.add_argument('--words', '-w', type=int, help='Number of words in outputtable candidates', default=4)
+    parser.add_argument('--workers', '-x', type=int, help='Manually specify the number of workers', default=mp.cpu_count() - 1)
+    parser.add_argument('--freqlist', '-f', help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words), to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find all chain start-points (in order) depending on model * freqlist size.', default='')
+    parser.add_argument('--gpusaturated', '-s', action='store_true', help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes', default=False)
+    parser.add_argument('--batchdepth', '-b', type=int, help='Number of ending words/recursions that should be handled in bulk by performing "collectall"', default=3)
 
     args = parser.parse_args()
 
