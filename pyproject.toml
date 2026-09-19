@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rephraser"
+version = "1.0.0"
+description = "Program for generating Markov chain passphrases from a corpus or model"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+authors = [
+    { name = "Travis Palmer" },
+]
+dependencies = [
+    "keyvi",
+    "markovify",
+]
+
+[project.scripts]
+rephraser = "rephraser:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
