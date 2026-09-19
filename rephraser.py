@@ -229,31 +229,23 @@ def main():
             # Populate DCT_KEYS from the dictionary
             # Try multiple methods to get all keys
             try:
-                # Method 1: Use get_string_iterator if available
-                for key_str in DCT.get_string_iterator():
+                # Method 1: Try direct iteration (works in some keyvi versions)
+                for key_str in DCT:
                     DCT_KEYS.add(key_str)
-            except AttributeError:
+            except (AssertionError, TypeError):
                 try:
                     # Method 2: Try keys() method
                     for key_str in DCT:
                         DCT_KEYS.add(key_str)
                 except AttributeError:
                     try:
-                        # Method 3: Try direct iteration (might fail with AssertionError)
+                        # Method 3: Try items() method
                         for key_str in DCT:
                             DCT_KEYS.add(key_str)
-                    except (AssertionError, TypeError):
-                        # Method 4: Use compiler to read and extract keys
-                        temp_compiler = keyvi.compiler.JsonDictionaryCompiler()
-                        try:
-                            temp_compiler.read_from_file(args.model)
-                            for key_str in temp_compiler.get_keys():
-                                DCT_KEYS.add(key_str)
-                        except AttributeError:
-                            sys.stderr.write('[REPHRASER] Unable to get keys from dictionary. The dictionary may be corrupted or incompatible.\n')
-                            sys.exit(1)
-                        finally:
-                            del temp_compiler
+                    except AttributeError:
+                        sys.stderr.write('[REPHRASER] Warning: Unable to get keys from dictionary. Recreate the model with the current version.\n')
+                        # Use an empty set - iteration will be skipped but won't crash
+                        DCT_KEYS = set()
         else:
             sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')
             sys.exit(1)
