@@ -43,8 +43,6 @@ Can be easy to remember if you say them to yourself "A diabetic-unicorn is trapp
 	 - [snappy](https://github.com/google/snappy) (apt package usually is `libsnappy-dev`)
 - **Python 3.9+** 
 
-#### Other files in this repo:
-- `rephraserBasic8.rule` Eight rules to alter rephraser's output into different common patterns of capitalization and spaces within hashcat
-- `travco_princev8.rule` manually written ruleset for hashcat for use agaisnt passphrases (4000+ rules)
-- `commonprefixes_sorted_50k.rule` ruleset made by running zxcvbn-python on the 37+ million 15+ character passphrases in the haveibeenpwnedv2 list, sorted with the most common prefixes first
-- `commonsuffixes_sorted_50k.rule` ruleset made by running zxcvbn-python on the 37+ million 15+ character passphrases in the haveibeenpwnedv2 list, sorted with the most common suffixes first
+#### Other file in this repo:
+- `rephraser.rule` Rules to alter rephraser's output into different common patterns of capitalization and spaces within hashcat
+
