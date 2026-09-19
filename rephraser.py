@@ -48,7 +48,10 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
     if DCT is None:
         raise RuntimeError("DCT is not initialized")
 
-    cstate_model = DCT[' '.join(state)].value
+    state_key = ' '.join(state)
+    if state_key not in DCT:
+        return completedchains
+    cstate_model = DCT[state_key].value
     if not func_prefix:
         func_prefix = list(state)
     if depth > 1:
@@ -123,7 +126,10 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
         func_prefix = []
     if DCT is None:
         return
-    cstate_model = DCT[' '.join(state)].value
+    state_key = ' '.join(state)
+    if state_key not in DCT:
+        return
+    cstate_model = DCT[state_key].value
     for weights in range(len(cstate_model[1])):
         if weights == 0:
             stateweights.append([cstate_model[1][weights], 0])
@@ -295,17 +301,12 @@ def main():
                     traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
     else:
         # Iterate on all keys in chain model, handling most likely key (start of sentence) first
-        # Only use BEGIN state if it exists in the DCT
         if DCT is None:
             raise RuntimeError("DCT is not initialized")
         if args.ngrams == 2:
-            begin_key = f'{BEGIN} {BEGIN}'
-            if begin_key in DCT:
-                traverselikely(MPQUEUE, (BEGIN, BEGIN), args.words, args.batchdepth, [])
+            traverselikely(MPQUEUE, (BEGIN, BEGIN), args.words, args.batchdepth, [])
         elif args.ngrams == 3:
-            begin_key = f'{BEGIN} {BEGIN} {BEGIN}'
-            if begin_key in DCT:
-                traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
+            traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
         for key in DCT:
             if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
                 continue
