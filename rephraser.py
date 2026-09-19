@@ -290,12 +290,17 @@ def main():
                     traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
     else:
         # Iterate on all keys in chain model, handling most likely key (start of sentence) first
-        if args.ngrams == 2:
-            traverselikely(MPQUEUE, (BEGIN, BEGIN), args.words, args.batchdepth, [])
-        elif args.ngrams == 3:
-            traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
+        # Only use BEGIN state if it exists in the DCT
         if DCT is None:
             raise RuntimeError("DCT is not initialized")
+        if args.ngrams == 2:
+            begin_key = f'{BEGIN} {BEGIN}'
+            if begin_key in DCT:
+                traverselikely(MPQUEUE, (BEGIN, BEGIN), args.words, args.batchdepth, [])
+        elif args.ngrams == 3:
+            begin_key = f'{BEGIN} {BEGIN} {BEGIN}'
+            if begin_key in DCT:
+                traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
         for key in DCT:
             if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
                 continue
