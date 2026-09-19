@@ -1,6 +1,8 @@
 """
 Fork from https://github.com/travco/rephraser
 """
+from __future__ import annotations
+
 import argparse
 import json
 import multiprocessing as mp
@@ -17,6 +19,7 @@ END = '___END__'
 DONE = '___DONE__'
 
 DCT: dict | None = {}  # Global mappings for shared memory managed by keyvi
+DCT_KEYS: set[str] = set()  # Global set of all dictionary keys for iteration
 mpqueue: mp.Queue | None = None # Work queue
 MAXQUEUESIZE: int = 100000  # Number of work items reasonable to have on queue
 
@@ -156,6 +159,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 def main():
+    global DCT_KEYS
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
@@ -191,8 +195,11 @@ def main():
                 sys.exit(1)
             COMBINED_MODEL.compile(inplace=True)
             keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
+            DCT_KEYS.clear()
             for key in COMBINED_MODEL.chain.model:
-                keyvicompiler.add(' '.join(key), json.dumps(COMBINED_MODEL.chain.model[key]))
+                key_str = ' '.join(key)
+                DCT_KEYS.add(key_str)
+                keyvicompiler.add(key_str, json.dumps(COMBINED_MODEL.chain.model[key]))
             del COMBINED_MODEL
             keyvicompiler.compile()
             keyvicompiler.write_to_file(args.model)
@@ -204,8 +211,11 @@ def main():
                 mmodel = markovify.Text(f, retain_original=False, state_size=args.ngrams)
             mmodel.compile(inplace=True)
             keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
+            DCT_KEYS.clear()
             for key in mmodel.chain.model:
-                keyvicompiler.Add(' '.join(key), json.dumps(mmodel.chain.model[key]))
+                key_str = ' '.join(key)
+                DCT_KEYS.add(key_str)
+                keyvicompiler.Add(key_str, json.dumps(mmodel.chain.model[key]))
             del mmodel
             keyvicompiler.Compile()
             keyvicompiler.WriteToFile(args.model)
@@ -214,7 +224,36 @@ def main():
     elif args.model != '':
         # Load a saved model in a keyvi file
         if os.path.isfile(args.model):
+            DCT_KEYS.clear()
             DCT = keyvi.dictionary.Dictionary(args.model)
+            # Populate DCT_KEYS from the dictionary
+            # Try multiple methods to get all keys
+            try:
+                # Method 1: Use get_string_iterator if available
+                for key_str in DCT.get_string_iterator():
+                    DCT_KEYS.add(key_str)
+            except AttributeError:
+                try:
+                    # Method 2: Try keys() method
+                    for key_str in DCT:
+                        DCT_KEYS.add(key_str)
+                except AttributeError:
+                    try:
+                        # Method 3: Try direct iteration (might fail with AssertionError)
+                        for key_str in DCT:
+                            DCT_KEYS.add(key_str)
+                    except (AssertionError, TypeError):
+                        # Method 4: Use compiler to read and extract keys
+                        temp_compiler = keyvi.compiler.JsonDictionaryCompiler()
+                        try:
+                            temp_compiler.read_from_file(args.model)
+                            for key_str in temp_compiler.get_keys():
+                                DCT_KEYS.add(key_str)
+                        except AttributeError:
+                            sys.stderr.write('[REPHRASER] Unable to get keys from dictionary. The dictionary may be corrupted or incompatible.\n')
+                            sys.exit(1)
+                        finally:
+                            del temp_compiler
         else:
             sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')
             sys.exit(1)
@@ -255,7 +294,7 @@ def main():
         # Iterate through all markov chain keys, keeping those that are in our freqlist, in the order of freqlist
         if DCT is None:
             raise RuntimeError("DCT is not initialized")
-        for key in DCT:
+        for key in DCT_KEYS:
             if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
                 continue
             if END in key:
@@ -307,7 +346,7 @@ def main():
             traverselikely(MPQUEUE, (BEGIN, BEGIN), args.words, args.batchdepth, [])
         elif args.ngrams == 3:
             traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
-        for key in DCT:
+        for key in DCT_KEYS:
             if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
                 continue
             # Need to convert string keys back into tuples for programmatic use
