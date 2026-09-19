@@ -1,9 +1,3 @@
-#!/usr/bin/env -S uv run --script
-# /// script  # noqa: EXE001
-# requires-python = ">=3.12"
-# dependencies = ["keyvi", "markovify"]
-# ///
-
 """
 Fork from https://github.com/travco/rephraser
 """
@@ -12,6 +6,7 @@ import json
 import multiprocessing as mp
 import os
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 import keyvi.compiler  # type: ignore
 import keyvi.dictionary  # type: ignore
@@ -24,6 +19,15 @@ DONE = '___DONE__'
 DCT: dict | None = {}  # Global mappings for shared memory managed by keyvi
 mpqueue: mp.Queue | None = None # Work queue
 MAXQUEUESIZE: int = 100000  # Number of work items reasonable to have on queue
+
+
+def get_version() -> str:
+    """Read the installed package version from distribution metadata"""
+    try:
+        return version('rephraser')
+    except PackageNotFoundError:
+        return 'unknown'
+
 
 def sanitizeandmutateword(word: str) -> str:
     """
@@ -147,6 +151,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
 
 def main():
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
     parser.add_argument('--ngrams', '-g', type=int, help='Number of words (n-grams) that make up a state in the Markov model, it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM, and 3 for the better linguistic accuracy', choices=[2, 3], default=2)
     parser.add_argument('--corpus', '-c', help='Path to a corpus (file with sentences) to convert into a Markov model', default='')
@@ -212,7 +217,7 @@ def main():
         sys.exit(1)
 
     if args.workers < 1:
-        WORKER_NUM: int = 1
+        WORKER_NUM = 1
     else:
         WORKER_NUM = args.workers
 
@@ -276,7 +281,7 @@ def main():
                 continue
             for tuplekey in freqtuplelist:
                 prefix_normal = list(tuplekey)
-                prefixmod: int = args.ngrams
+                prefixmod = args.ngrams
                 if tuplekey[0] == BEGIN:
                     prefixmod = args.ngrams - 1
                     prefix_normal = list(tuplekey[1:])
