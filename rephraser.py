@@ -11,9 +11,9 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from signal import SIGINT, signal
 
-import keyvi.compiler  # type: ignore
-import keyvi.dictionary  # type: ignore
-import markovify  # type: ignore
+import keyvi.compiler  # type: ignore[import-untyped]
+import keyvi.dictionary  # type: ignore[import-untyped]
+import markovify  # type: ignore[import-untyped]
 
 BEGIN = '___BEGIN__'
 END = '___END__'
@@ -21,7 +21,7 @@ DONE = '___DONE__'
 undesirable_chars = [',','.',';',':','?','\'','"','"','"','"']
 
 DCT = None  # Global mappings for shared memory managed by keyvi
-DCT_KEYS = set()  # Global set of all dictionary keys for iteration
+DCT_KEYS: set[str] = set()  # Global set of all dictionary keys for iteration
 mpqueue = None # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
