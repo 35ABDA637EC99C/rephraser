@@ -29,6 +29,11 @@ worker_num = 0  # Will be changed before creating workers
 if sys.platform == "darwin":
   MAXQUEUESIZE=32767 #max allowed mp queue size on mac
   mp.set_start_method("fork") #necessary for workers to inherit global vars on mac
+else:
+  try:
+    mp.set_start_method("fork")
+  except RuntimeError:
+    pass  # fork is not available on this platform
 
 def sigint_handler(signal_received, frame):
   # Parent *should* be able to exit
@@ -238,7 +243,7 @@ def main():
             DCT_KEYS.clear()
             DCT = keyvi.dictionary.Dictionary(args.model)
             # Populate DCT_KEYS from the dictionary
-            for key_str in DCT:
+            for key_str in DCT.keys():
                 DCT_KEYS.add(key_str)
         else:
             sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')
