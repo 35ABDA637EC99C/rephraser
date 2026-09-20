@@ -280,7 +280,7 @@ def main():
         else:
             sys.stderr.write('[REPHRASER] Couldn\'t find freqlist at ' + args.freqlist + '\n[REPHRASER] Exiting!\n')
             sys.exit(1)
-
+        freq_dict = {word.lower(): idx for idx, word in enumerate(freqlist)}
         freqtuplelists: list[list[tuple]] = []
         # Create array of arrays to hold keys corresponding to words in freqlist
         for freq in freqlist:
@@ -295,25 +295,19 @@ def main():
                 continue
             tuplekey = tuple(key.split(' ', args.ngrams - 1))
             if args.ngrams > 2 and BEGIN in tuplekey[1]:
-                try:
-                    foundindex = freqlist.index(tuplekey[2].lower())
+                foundindex = freq_dict.get(tuplekey[2].lower())
+                if foundindex is not None:
                     freqtuplelists[foundindex].append(tuplekey)
-                except ValueError:
-                    pass
             elif BEGIN in tuplekey[0]:
-                try:
-                    foundindex = freqlist.index(tuplekey[1].lower())
+                foundindex = freq_dict.get(tuplekey[1].lower())
+                if foundindex is not None:
                     freqtuplelists[foundindex].append(tuplekey)
-                except ValueError:
-                    pass
             else:
-                try:
-                    foundindex = freqlist.index(tuplekey[0].lower())
+                foundindex = freq_dict.get(tuplekey[0].lower())
+                if foundindex is not None:
                     freqtuplelists[foundindex].append(tuplekey)
-                except ValueError:
-                    pass
         # No need for freqlist this point onward
-        del freqlist
+        del freqlist, freq_dict
         # Iterate on keys, handling the indicated keys only
         for freqtuplelist in freqtuplelists:
             if not freqtuplelist:
