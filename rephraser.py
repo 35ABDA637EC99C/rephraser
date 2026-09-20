@@ -117,22 +117,31 @@ def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None
                     sys.stdout.flush()
             else:
                 for outlist in outchains:
+                    space_joined = ' '.join(outlist)
+                    no_space = ''.join(outlist)
+                    lower_space = space_joined.lower()
+                    lower_no_space = no_space.lower()
+                    first, *rest = outlist
+                    rest_space = ' '.join(rest)
+                    rest_no_space = ''.join(rest)
+                    rest_lower_space = rest_space.lower()
+                    rest_lower_no_space = rest_no_space.lower()
                     # Titlecase with spaces
-                    sys.stdout.write(' '.join(outlist) + '\n')
+                    sys.stdout.write(space_joined + '\n')
                     # Titlecase without spaces
-                    sys.stdout.write(''.join(outlist) + '\n')
+                    sys.stdout.write(no_space + '\n')
                     # Lowercase with spaces
-                    sys.stdout.write(' '.join(outlist).lower() + '\n')
+                    sys.stdout.write(lower_space + '\n')
                     # Lowercase without spaces
-                    sys.stdout.write(''.join(outlist).lower() + '\n')
+                    sys.stdout.write(lower_no_space + '\n')
                     # First letter capitalized with spaces
-                    sys.stdout.write(outlist[0] + ' ' + ' '.join(outlist[1:]).lower() + '\n')
+                    sys.stdout.write(first + ' ' + rest_lower_space + '\n')
                     # First letter capitalized without spaces
-                    sys.stdout.write(outlist[0] + ''.join(outlist[1:]).lower() + '\n')
+                    sys.stdout.write(first + rest_lower_no_space + '\n')
                     # Camelcase with spaces
-                    sys.stdout.write(outlist[0].lower() + ' ' + ' '.join(outlist[1:]) + '\n')
+                    sys.stdout.write(first.lower() + ' ' + rest_space + '\n')
                     # Camelcase without spaces
-                    sys.stdout.write(outlist[0].lower() + ''.join(outlist[1:]) + '\n')
+                    sys.stdout.write(first.lower() + rest_no_space + '\n')
                     sys.stdout.flush()
 
 def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list | None = None) -> None:
