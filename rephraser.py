@@ -113,25 +113,27 @@ def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None
             if not gpusaturated:
                 for outlist in outchains:
                     # Titlecase with spaces
-                    print(' '.join(outlist))
+                    sys.stdout.write(' '.join(outlist) + '\n')
+                    sys.stdout.flush()
             else:
                 for outlist in outchains:
                     # Titlecase with spaces
-                    print(' '.join(outlist))
+                    sys.stdout.write(' '.join(outlist) + '\n')
                     # Titlecase without spaces
-                    print(''.join(outlist))
+                    sys.stdout.write(''.join(outlist) + '\n')
                     # Lowercase with spaces
-                    print(' '.join(outlist).lower())
+                    sys.stdout.write(' '.join(outlist).lower() + '\n')
                     # Lowercase without spaces
-                    print(''.join(outlist).lower())
+                    sys.stdout.write(''.join(outlist).lower() + '\n')
                     # First letter capitalized with spaces
-                    print(outlist[0] + ' ' + ' '.join(outlist[1:]).lower())
+                    sys.stdout.write(outlist[0] + ' ' + ' '.join(outlist[1:]).lower() + '\n')
                     # First letter capitalized without spaces
-                    print(outlist[0] + ''.join(outlist[1:]).lower())
+                    sys.stdout.write(outlist[0] + ''.join(outlist[1:]).lower() + '\n')
                     # Camelcase with spaces
-                    print(outlist[0].lower() + ' ' + ' '.join(outlist[1:]))
+                    sys.stdout.write(outlist[0].lower() + ' ' + ' '.join(outlist[1:]) + '\n')
                     # Camelcase without spaces
-                    print(outlist[0].lower() + ''.join(outlist[1:]))
+                    sys.stdout.write(outlist[0].lower() + ''.join(outlist[1:]) + '\n')
+                    sys.stdout.flush()
 
 def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list | None = None) -> None:
     """
@@ -175,7 +177,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 def main():
-    global DCT_KEYS, DCT, mpqueue, worker_num
+    global DCT_KEYS, DCT, mpqueue, worker_num  # noqa: PLW0602
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
@@ -243,7 +245,7 @@ def main():
             DCT_KEYS.clear()
             DCT = keyvi.dictionary.Dictionary(args.model)
             # Populate DCT_KEYS from the dictionary
-            for key_str in DCT.keys():
+            for key_str in DCT.keys():  # noqa: SIM118
                 DCT_KEYS.add(key_str)
         else:
             sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rephraser"
-version = "1.0.8"
+version = "1.0.9"
 description = "Program for generating Markov chain passphrases from a corpus or model"
 readme = "README.md"
 license = {text = "MIT"}
