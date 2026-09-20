@@ -9,6 +9,7 @@ import multiprocessing as mp
 import os
 import sys
 from importlib.metadata import PackageNotFoundError, version
+from signal import SIGINT, signal
 
 import keyvi.compiler  # type: ignore
 import keyvi.dictionary  # type: ignore
@@ -17,12 +18,24 @@ import markovify  # type: ignore
 BEGIN = '___BEGIN__'
 END = '___END__'
 DONE = '___DONE__'
+undesirable_chars = [',','.',';',':','?','\'','"','"','"','"']
 
-DCT: dict | None = {}  # Global mappings for shared memory managed by keyvi
-DCT_KEYS: set[str] = set()  # Global set of all dictionary keys for iteration
-mpqueue: mp.Queue | None = None # Work queue
-MAXQUEUESIZE: int = 100000  # Number of work items reasonable to have on queue
+DCT = None  # Global mappings for shared memory managed by keyvi
+DCT_KEYS = set()  # Global set of all dictionary keys for iteration
+mpqueue = None # Work queue
+MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
+worker_num = 0  # Will be changed before creating workers
 
+if sys.platform == "darwin":
+  MAXQUEUESIZE=32767 #max allowed mp queue size on mac
+  mp.set_start_method("fork") #necessary for workers to inherit global vars on mac
+
+def sigint_handler(signal_received, frame):
+  # Parent *should* be able to exit
+  sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. Attempting to exit gracefully...\n')
+  last_work_item = mpqueue.get(block=False)
+  sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
+  sys.exit(0)
 
 def get_version() -> str:
     """Read the installed package version from distribution metadata"""
@@ -36,12 +49,14 @@ def sanitizeandmutateword(word: str) -> str:
     """
     Capitalize the first letter
     """
-    wordlength: int = len(word)
-    firstchar: str = word[0]
-    restofword: str = word[1:]
-    if wordlength > 1:
-        return firstchar.capitalize() + restofword  # Preserve rest of case on capitalized acronyms
-    return word.capitalize()
+    if word[0] in undesirable_chars:
+        word = word[1:]
+    if word != '' and word[-1] in undesirable_chars:
+      word = word[0:len(word)-1]
+    if len(word) > 1:
+        return word[0].capitalize() + word[1:]  # Preserve rest of case on capitalized acronyms
+    else:
+        return word.capitalize()
 
 def collectall(state: list, depth: int, func_prefix: list) -> list:
     """
@@ -76,7 +91,7 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
                     completedchains.append(mutated_prefix + [mutated_word])
     return completedchains
 
-def workercollectall(func_mpqueue: mp.Queue, use_simplejoin: bool = False) -> None:
+def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None:
     """Worker function to collect all chains of a certain depth, and output them in titlecase"""
     # Landing function for workers
     while True:
@@ -90,32 +105,28 @@ def workercollectall(func_mpqueue: mp.Queue, use_simplejoin: bool = False) -> No
                 break
             outchains: list[list[str]] = collectall(state, depth, prefix)
             # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
-            space: str = " "
-            nospace: str = ""
-            if use_simplejoin:
+            if not gpusaturated:
                 for outlist in outchains:
                     # Titlecase with spaces
-                    sys.stdout.write(f'{space.join(outlist)}\n')
-                    # Titlecase without spaces
-                    sys.stdout.write(f'{nospace.join(outlist)}\n')
+                    print(' '.join(outlist))
             else:
                 for outlist in outchains:
                     # Titlecase with spaces
-                    sys.stdout.write(f'{space.join(outlist)}\n')
+                    print(' '.join(outlist))
                     # Titlecase without spaces
-                    sys.stdout.write(f'{nospace.join(outlist)}\n')
+                    print(''.join(outlist))
                     # Lowercase with spaces
-                    sys.stdout.write(f'{space.join(outlist).lower()}\n')
+                    print(' '.join(outlist).lower())
                     # Lowercase without spaces
-                    sys.stdout.write(f'{nospace.join(outlist).lower()}\n')
+                    print(''.join(outlist).lower())
                     # First letter capitalized with spaces
-                    sys.stdout.write(f'{outlist[0].capitalize() + space + space.join(outlist[1:]).lower()}\n')
+                    print(outlist[0] + ' ' + ' '.join(outlist[1:]).lower())
                     # First letter capitalized without spaces
-                    sys.stdout.write(f'{outlist[0].capitalize() + nospace.join(outlist[1:]).lower()}\n')
+                    print(outlist[0] + ''.join(outlist[1:]).lower())
                     # Camelcase with spaces
-                    sys.stdout.write(f'{outlist[0].lower() + space + space.join(outlist[1:])}\n')
+                    print(outlist[0].lower() + ' ' + ' '.join(outlist[1:]))
                     # Camelcase without spaces
-                    sys.stdout.write(f'{outlist[0].lower() + nospace.join(outlist[1:])}\n')
+                    print(outlist[0].lower() + ''.join(outlist[1:]))
 
 def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list | None = None) -> None:
     """
@@ -159,7 +170,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 def main():
-    global DCT_KEYS
+    global DCT_KEYS, DCT, mpqueue, worker_num
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
@@ -227,25 +238,8 @@ def main():
             DCT_KEYS.clear()
             DCT = keyvi.dictionary.Dictionary(args.model)
             # Populate DCT_KEYS from the dictionary
-            # Try multiple methods to get all keys
-            try:
-                # Method 1: Try direct iteration (works in some keyvi versions)
-                for key_str in DCT:
-                    DCT_KEYS.add(key_str)
-            except (AssertionError, TypeError):
-                try:
-                    # Method 2: Try keys() method
-                    for key_str in DCT:
-                        DCT_KEYS.add(key_str)
-                except AttributeError:
-                    try:
-                        # Method 3: Try items() method
-                        for key_str in DCT:
-                            DCT_KEYS.add(key_str)
-                    except AttributeError:
-                        sys.stderr.write('[REPHRASER] Warning: Unable to get keys from dictionary. Recreate the model with the current version.\n')
-                        # Use an empty set - iteration will be skipped but won't crash
-                        DCT_KEYS = set()
+            for key_str in DCT:
+                DCT_KEYS.add(key_str)
         else:
             sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')
             sys.exit(1)
@@ -254,21 +248,22 @@ def main():
         sys.exit(1)
 
     if args.workers < 1:
-        WORKER_NUM = 1
+        worker_num = 1
     else:
-        WORKER_NUM = args.workers
+        worker_num = args.workers
 
-    MPQUEUE: mp.Queue = mp.Queue(MAXQUEUESIZE)
+    mpqueue = mp.Queue(MAXQUEUESIZE)
     GPUSATURATED = args.gpusaturated # Whether to create "Basic8" permutations in CPU workers
     # Spin up workers once and early
     worker_processes = []
-    for i in range(WORKER_NUM):
-        worker = mp.Process(target=workercollectall, args=((MPQUEUE), GPUSATURATED))
+    for i in range(worker_num):
+        worker = mp.Process(target=workercollectall, args=(mpqueue, GPUSATURATED))
         worker.daemon = True
         worker.start()
         worker_processes.append(worker)
 
     # Change signal handling in only parent
+    signal(SIGINT, sigint_handler)
     if args.freqlist != '':
         # Iterate on most-frequently used words input, as long as they in the model
         freqlist: list[str] = []
@@ -327,17 +322,17 @@ def main():
                     prefix_normal = list(tuplekey[2:])
                 # Handle the common-case where the tuplekey puts us below the batchdepth
                 if args.words - prefixmod <= args.batchdepth:
-                    MPQUEUE.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
+                    mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
                 else:
-                    traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
+                    traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
     else:
         # Iterate on all keys in chain model, handling most likely key (start of sentence) first
         if DCT is None:
             raise RuntimeError("DCT is not initialized")
         if args.ngrams == 2:
-            traverselikely(MPQUEUE, (BEGIN, BEGIN), args.words, args.batchdepth, [])
+            traverselikely(mpqueue, (BEGIN, BEGIN), args.words, args.batchdepth, [])
         elif args.ngrams == 3:
-            traverselikely(MPQUEUE, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
+            traverselikely(mpqueue, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
         for key in DCT_KEYS:
             if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
                 continue
@@ -355,13 +350,13 @@ def main():
                 prefix_normal = list(tuplekey[2:])
             # Handle the common-case where the tuplekey puts us below the batchdepth
             if args.words - prefixmod <= args.batchdepth:
-                MPQUEUE.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
+                mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
             else:
-                traverselikely(MPQUEUE, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
+                traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
 
     # Wrap up, send end-of-work signals to workers (one each)
     for worker in worker_processes:
-        MPQUEUE.put([DONE, DONE, DONE])
+        mpqueue.put([DONE, DONE, DONE])
 
     sys.stderr.write('\n[REPHRASER] Scheduler work completed! Waiting patiently for workers to finish queued work...\n')
     # Wait for workers to empty queue and hit done signals before killing parent process.
