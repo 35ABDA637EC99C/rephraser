@@ -234,7 +234,7 @@ def main():
             DCT = keyvi.dictionary.Dictionary(args.model)
         elif os.path.isfile(args.corpus):
             # Load single-file corpus from --corpus
-            with open(args.corpus, encoding='utf-8') as f:
+            with open(args.corpus, encoding='utf-8', errors='ignore') as f:
                 mmodel = markovify.Text(f, retain_original=False, state_size=args.ngrams)
             mmodel.compile(inplace=True)
             keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
