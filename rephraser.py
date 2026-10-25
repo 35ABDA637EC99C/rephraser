@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import json
 import multiprocessing as mp
 import os
 import sys
@@ -15,6 +14,7 @@ from importlib.metadata import version
 from signal import SIGINT, signal
 
 import markovify  # type: ignore[import-untyped]  # ty: ignore[unresolved-import]
+import orjson
 
 BEGIN = '___BEGIN__'
 END = '___END__'
@@ -22,7 +22,6 @@ DONE = '___DONE__'
 undesirable_chars: tuple[str, ...] = (',','.',';',':','?','\'','"')
 
 DCT = None  # Global dictionary for Markov model data
-DCT_KEYS: set[str] = set()  # Global set of all dictionary keys for iteration
 mpqueue = None # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
@@ -298,7 +297,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 def main():
-    global DCT_KEYS, DCT, mpqueue, worker_num, MEM_LIMIT_BYTES, TOTAL_MEM, WORKITEM_BYTES, worker_pids, _worker_base_rss  # noqa: PLW0602
+    global DCT, mpqueue, worker_num, MEM_LIMIT_BYTES, TOTAL_MEM, WORKITEM_BYTES, worker_pids, _worker_base_rss
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (gzip-compressed JSON, make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
@@ -321,26 +320,19 @@ def main():
                 mmodel = markovify.Text(f, retain_original=False, state_size=args.ngrams)
             mmodel.compile(inplace=True)
             DCT = {}
-            DCT_KEYS.clear()
             for key in mmodel.chain.model:
-                key_str = ' '.join(key)
-                DCT_KEYS.add(key_str)
-                DCT[key_str] = list(mmodel.chain.model[key])
+                DCT[' '.join(key)] = list(mmodel.chain.model[key])
             del mmodel
-            with gzip.open(args.model, 'wt', encoding='utf-8') as f:
-                json.dump(DCT, f)
+            with gzip.open(args.model, 'wb') as f:
+                f.write(orjson.dumps(DCT))
         else:
             sys.stderr.write('[REPHRASER] Corpus path is neither a file nor a directory: ' + args.corpus + '\n[REPHRASER] Exiting!\n')
             sys.exit(1)
     elif args.model != '':
         # Load a saved model from gzip-compressed JSON file
         if os.path.isfile(args.model):
-            DCT_KEYS.clear()
-            with gzip.open(args.model, 'rt', encoding='utf-8') as f:
-                DCT = json.load(f)
-            # Populate DCT_KEYS from the dictionary
-            for key_str in DCT:
-                DCT_KEYS.add(key_str)
+            with gzip.open(args.model, 'rb') as f:
+                DCT = orjson.loads(f.read())
         else:
             sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')
             sys.exit(1)
@@ -400,7 +392,7 @@ def main():
         traverselikely(mpqueue, (BEGIN, BEGIN), args.words, args.batchdepth, [])
     elif args.ngrams == 3:
         traverselikely(mpqueue, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
-    for key in DCT_KEYS:
+    for key in DCT:
         if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
             continue
         # Need to convert string keys back into tuples for programmatic use
