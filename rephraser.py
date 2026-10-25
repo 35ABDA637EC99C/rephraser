@@ -8,7 +8,6 @@ import gzip
 import json
 import multiprocessing as mp
 import os
-import queue
 import sys
 import time
 from importlib.metadata import version
@@ -23,7 +22,7 @@ undesirable_chars = [',','.',';',':','?','\'','"','"','"','"']
 
 DCT = None  # Global dictionary for Markov model data
 DCT_KEYS: set[str] = set()  # Global set of all dictionary keys for iteration
-mpqueue: mp.Queue | None = None  # Work queue
+mpqueue = None # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
 
@@ -67,7 +66,7 @@ def process_rss(pid: int) -> int:
 
 def tree_rss() -> int:
     """Sum RSS of the parent (which holds the model) and all workers"""
-    rss = process_rss(os.getpid())
+    rss: int = process_rss(os.getpid())
     for pid in worker_pids:
         rss += process_rss(pid)
     return rss
@@ -78,7 +77,7 @@ def predicted_usage() -> int:
     if mpqueue is None:
         return tree_rss()
     try:
-        qsize = mpqueue.qsize()
+        qsize: int = mpqueue.qsize()
     except NotImplementedError:
         qsize = 0
     return tree_rss() + qsize * WORKITEM_BYTES
@@ -142,12 +141,8 @@ except RuntimeError:
 def sigint_handler(signal_received, frame):
   # Parent *should* be able to exit
   sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. Attempting to exit gracefully...\n')
-  if mpqueue is not None:
-    try:
-      last_work_item = mpqueue.get(block=False)
-      sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
-    except queue.Empty:
-      sys.stderr.write('[REPHRASER] Queue was empty.\n')
+  last_work_item = mpqueue.get(block=False)  # ty: ignore[unresolved-attribute]
+  sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
   sys.exit(0)
 
 def get_version() -> str:
@@ -409,7 +404,7 @@ def main():
 
     if args.freqlist != '':
         # Iterate on most-frequently used words input, as long as they in the model
-        freqlist: list[str] = []
+        freqlist = []
         if os.path.isfile(args.freqlist):
             with open(args.freqlist, encoding='utf-8', errors='ignore') as f:
                 freqlist = f.read().split('\n')
@@ -417,7 +412,7 @@ def main():
             sys.stderr.write('[REPHRASER] Couldn\'t find freqlist at ' + args.freqlist + '\n[REPHRASER] Exiting!\n')
             sys.exit(1)
         freq_dict = {word.lower(): idx for idx, word in enumerate(freqlist)}
-        freqtuplelists: list[list[tuple]] = []
+        freqtuplelists = []
         # Create array of arrays to hold keys corresponding to words in freqlist
         for freq in freqlist:
             freqtuplelists.append([])
