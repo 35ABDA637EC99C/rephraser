@@ -8,7 +8,9 @@ import gzip
 import json
 import multiprocessing as mp
 import os
+import queue
 import sys
+import time
 from importlib.metadata import version
 from signal import SIGINT, signal
 
@@ -21,9 +23,115 @@ undesirable_chars = [',','.',';',':','?','\'','"','"','"','"']
 
 DCT = None  # Global dictionary for Markov model data
 DCT_KEYS: set[str] = set()  # Global set of all dictionary keys for iteration
-mpqueue = None # Work queue
+mpqueue: mp.Queue | None = None  # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
+
+# Memory governor state (parent-side): keeps predicted memory usage below a
+# fraction of physical RAM by pausing the work producer while workers drain
+# the queue. Output still flows while paused, so downstream consumers
+# (hashcat) keep receiving input.
+MEM_TARGET = 0.80  # Fraction of physical RAM we aim to stay under
+TOTAL_MEM = 0  # Total physical memory in bytes (0 = unknown, governor disabled)
+WORKITEM_BYTES = 0  # Predicted peak memory cost of a single queued work item
+worker_pids: list[int] = []  # PIDs of worker processes, for RSS summation
+_put_counter = 0  # Cheap-check counter so we don't stat /proc on every put
+
+
+def get_total_memory() -> int:
+    """Return total physical memory in bytes, or 0 if it cannot be determined"""
+    try:
+        with open('/proc/meminfo', encoding='ascii') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        pass
+    try:
+        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
+def process_rss(pid: int) -> int:
+    """Return resident set size of a process in bytes, or 0 if unknown"""
+    try:
+        with open('/proc/' + str(pid) + '/status', encoding='ascii') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        return 0
+    return 0
+
+
+def tree_rss() -> int:
+    """Sum RSS of the parent (which holds the model) and all workers"""
+    rss = process_rss(os.getpid())
+    for pid in worker_pids:
+        rss += process_rss(pid)
+    return rss
+
+
+def predicted_usage() -> int:
+    """Current RSS of the process tree plus predicted memory of queued work items"""
+    if mpqueue is None:
+        return tree_rss()
+    try:
+        qsize = mpqueue.qsize()
+    except NotImplementedError:
+        qsize = 0
+    return tree_rss() + qsize * WORKITEM_BYTES
+
+
+def estimate_workitem_bytes(batchdepth: int) -> int:
+    """
+    Estimate the peak memory a single queued work item will cost when a worker
+    expands it with collectall. Sampled from the model: average branching factor
+    gives the expected number of chains (branching ** batchdepth), each chain
+    costing roughly its words' characters plus per-string object overhead.
+    Deliberately conservative (2x safety factor) since underestimating causes OOM.
+    """
+    if DCT is None or not DCT:
+        return 0
+    sampled_states = 0
+    branch_total = 0
+    wordlen_total = 0
+    word_count = 0
+    for key in DCT:
+        words = DCT[key][0]
+        branch_total += len(words)
+        sampled_states += 1
+        for word in words:
+            wordlen_total += len(word)
+            word_count += 1
+        if sampled_states >= 20000:
+            break
+    if sampled_states == 0 or word_count == 0:
+        return 0
+    avg_branch = min(branch_total / sampled_states, 100.0)  # cap pathological branching
+    avg_wordlen = wordlen_total / word_count
+    expected_chains = max(avg_branch ** max(batchdepth, 1), 1.0)
+    bytes_per_chain = batchdepth * (avg_wordlen + 50) + 100  # str object overhead
+    return int(expected_chains * bytes_per_chain * 2)
+
+
+def throttle() -> None:
+    """
+    Called before queueing work. Blocks the producer while predicted memory
+    usage is at/above the target, letting workers consume the queue (and emit
+    output) until usage drops back under target. Checked only every 32 puts to
+    keep /proc stat overhead negligible.
+    """
+    global _put_counter
+    _put_counter += 1
+    if TOTAL_MEM <= 0 or WORKITEM_BYTES <= 0:
+        return
+    if _put_counter % 32 != 0:
+        return
+    limit = TOTAL_MEM * MEM_TARGET
+    while predicted_usage() >= limit:
+        time.sleep(0.002)
 
 
 try:
@@ -34,8 +142,12 @@ except RuntimeError:
 def sigint_handler(signal_received, frame):
   # Parent *should* be able to exit
   sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. Attempting to exit gracefully...\n')
-  last_work_item = mpqueue.get(block=False)  # ty: ignore[unresolved-attribute]
-  sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
+  if mpqueue is not None:
+    try:
+      last_work_item = mpqueue.get(block=False)
+      sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
+    except queue.Empty:
+      sys.stderr.write('[REPHRASER] Queue was empty.\n')
   sys.exit(0)
 
 def get_version() -> str:
@@ -171,6 +283,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
                 continue
             nextstate = tuple(state[1:]) + (nextword,)
             # Parallelize below batchdepth
+            throttle()
             func_mpqueue.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
     else:
         for weighted in stateweights:
@@ -182,7 +295,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 def main():
-    global DCT_KEYS, DCT, mpqueue, worker_num  # noqa: PLW0602
+    global DCT_KEYS, DCT, mpqueue, worker_num, MEM_TARGET, TOTAL_MEM, WORKITEM_BYTES, worker_pids  # noqa: PLW0602
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (gzip-compressed JSON, make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
@@ -194,6 +307,7 @@ def main():
     parser.add_argument('--freqlist', '-f', help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words), to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find all chain start-points (in order) depending on model * freqlist size.', default='')
     parser.add_argument('--gpusaturated', '-s', action='store_true', help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes', default=False)
     parser.add_argument('--batchdepth', '-b', type=int, help='Number of ending words/recursions that should be handled in bulk by performing "collectall"', default=3)
+    parser.add_argument('--mem-limit', type=int, help='Percentage of physical RAM the memory governor aims to stay under while queueing work (0 disables the governor)', default=80)
 
     args = parser.parse_args()
 
@@ -278,6 +392,21 @@ def main():
 
     # Change signal handling in only parent
     signal(SIGINT, sigint_handler)
+
+    # Initialize the memory governor: predict per-work-item memory cost from the
+    # model and track RSS of parent (model) plus workers against the RAM target.
+    TOTAL_MEM = get_total_memory()
+    if args.mem_limit > 0:
+        MEM_TARGET = args.mem_limit / 100
+    else:
+        MEM_TARGET = 0  # disables throttle entirely
+    WORKITEM_BYTES = estimate_workitem_bytes(args.batchdepth)
+    worker_pids = [w.pid for w in worker_processes if w.pid is not None]
+    if TOTAL_MEM > 0:
+        sys.stderr.write('[REPHRASER] Memory governor active: target ' + str(args.mem_limit) + '% of ' + str(TOTAL_MEM // (1024 * 1024)) + ' MiB, estimated ' + str(WORKITEM_BYTES // 1024) + ' KiB per work item\n')
+    else:
+        sys.stderr.write('[REPHRASER] Could not determine total system memory, memory governor disabled\n')
+
     if args.freqlist != '':
         # Iterate on most-frequently used words input, as long as they in the model
         freqlist: list[str] = []
@@ -330,6 +459,7 @@ def main():
                     prefix_normal = list(tuplekey[2:])
                 # Handle the common-case where the tuplekey puts us below the batchdepth
                 if args.words - prefixmod <= args.batchdepth:
+                    throttle()
                     mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
                 else:
                     traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
