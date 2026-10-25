@@ -30,7 +30,7 @@ worker_num = 0  # Will be changed before creating workers
 # fraction of physical RAM by pausing the work producer while workers drain
 # the queue. Output still flows while paused, so downstream consumers
 # (hashcat) keep receiving input.
-MEM_TARGET = 0.50  # Fraction of physical RAM we aim to stay under
+MEM_TARGET = 0.80  # Fraction of physical RAM we aim to stay under
 TOTAL_MEM = 0  # Total physical memory in bytes (0 = unknown, governor disabled)
 WORKITEM_BYTES = 0  # Predicted peak memory cost of a single queued work item
 MEM_BASELINE = 0  # RSS of the process tree before any work is queued (model + idle workers)
@@ -42,6 +42,7 @@ _avg_branch = 1.0  # Sampled average branching factor of the model (set by estim
 _bytes_per_chain = 0.0  # Sampled average bytes per generated chain
 worker_pids: list[int] = []  # PIDs of worker processes, for RSS summation
 _put_counter = 0  # Cheap-check counter so we don't stat /proc on every put
+_cached_rss_growth = 0  # Last measured tree RSS growth above the baseline
 
 
 def get_available_memory() -> int:
@@ -82,16 +83,10 @@ def tree_rss() -> int:
     return rss
 
 
-def predicted_usage() -> int:
-    """
-    Predicted *incremental* memory above the pre-production baseline: growth of
-    the process tree RSS plus estimated bytes of work still sitting on the queue.
-    The baseline (model + idle workers) is subtracted so a large model does not
-    itself push the producer into permanent throttling.
-    """
-    growth: int = tree_rss() - MEM_BASELINE
-    growth = max(growth, 0)
-    return growth + int(_queued_bytes)
+def _measure_rss_growth() -> int:
+    """Tree RSS growth above the pre-production baseline, floored at 0"""
+    growth = tree_rss() - MEM_BASELINE
+    return max(growth, 0)
 
 
 def estimate_workitem_bytes(batchdepth: int) -> int:
@@ -161,24 +156,27 @@ def current_qsize() -> int:
 
 def throttle() -> None:
     """
-    Called before queueing work. Blocks the producer while predicted memory
-    usage is at/above the target, letting workers consume the queue (and emit
-    output) until usage drops back under target. Checked only every 32 puts to
-    keep /proc stat overhead negligible. Exempt during the startup grace period
-    so downstream consumers (hashcat) start receiving data immediately.
+    Called before queueing work. Guarantees that no work item is queued while
+    predicted memory usage is at/above the target: the check runs before every
+    single put, using a cheap cached estimate (last measured RSS growth plus
+    the tracked queue bytes). The expensive /proc re-measure happens every 32
+    puts to keep overhead negligible, and inside the wait loop so blocked
+    producers react as workers drain the queue. During the startup grace
+    period the /proc re-measure runs on every put instead (still cheap), so
+    the cached growth value starts out accurate.
     """
-    global _put_counter
+    global _put_counter, _cached_rss_growth
     _put_counter += 1
     if TOTAL_MEM <= 0 or WORKITEM_BYTES <= 0 or MEM_TARGET <= 0:
         return
-    if time.monotonic() - _start_time < START_GRACE_SECONDS:
-        _reconcile_queue_bytes(current_qsize())
-        return
-    if _put_counter % 32 != 0:
-        return
     limit = TOTAL_MEM * MEM_TARGET
-    while predicted_usage() >= limit:
+    in_grace = time.monotonic() - _start_time < START_GRACE_SECONDS
+    if _put_counter % 32 == 0 or in_grace:
         _reconcile_queue_bytes(current_qsize())
+        _cached_rss_growth = _measure_rss_growth()
+    while _cached_rss_growth + int(_queued_bytes) >= limit:
+        _reconcile_queue_bytes(current_qsize())
+        _cached_rss_growth = _measure_rss_growth()
         time.sleep(0.002)
 
 
