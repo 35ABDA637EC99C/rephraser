@@ -39,6 +39,14 @@ worker_pids: list[int] = []  # PIDs of worker processes
 _worker_base_rss: dict[int, int] = {}  # Idle RSS per worker, so only private growth counts
 _cached_extra_rss = 0  # Last measured combined worker RSS growth
 _last_measure_time = 0.0  # monotonic time of the last measurement (0 = never)
+OOM_GUARD_THRESHOLD = 0.95  # Hard cap: no memory-growing work at 95% system RAM use, regardless of --mem_limit
+OOM_STALL_ABORT_SECONDS = 60  # Give up remaining work if pinned at the threshold this long
+_oom_cache_time = 0.0  # monotonic time of the last MemAvailable sample (0 = never)
+_oom_cache_pressured = False  # Last sampled OOM-guard verdict
+
+
+class WorkAborted(Exception):
+    """Raised when the OOM guard gives up on the remaining work to avoid an OOM."""
 
 
 def get_total_memory() -> int:
@@ -132,13 +140,60 @@ def item_bytes(depth: int) -> float:
     return expected_chains * _bytes_per_chain * 2
 
 
+def memory_pressured(max_age: float = 0.25) -> bool:
+    """
+    True when system-wide memory use is at/above the OOM guard threshold
+    (95% of physical RAM), regardless of --mem_limit. Measured from
+    /proc/meminfo (MemAvailable vs MemTotal), cached for max_age seconds so
+    per-put calls are cheap; pass max_age=0 to force a fresh read (used
+    inside the stall wait loop).
+    """
+    global _oom_cache_time, _oom_cache_pressured
+    now = time.monotonic()
+    if _oom_cache_time > 0 and now - _oom_cache_time < max_age:
+        return _oom_cache_pressured
+    pressured = False
+    try:
+        with open('/proc/meminfo', encoding='ascii') as f:
+            total = 0
+            available = 0
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    total = int(line.split()[1]) * 1024
+                elif line.startswith('MemAvailable:'):
+                    available = int(line.split()[1]) * 1024
+                if total and available:
+                    break
+            pressured = total > 0 and available <= total * (1 - OOM_GUARD_THRESHOLD)
+    except (OSError, ValueError):
+        pressured = False
+    _oom_cache_pressured = pressured
+    _oom_cache_time = now
+    return pressured
+
+
 def throttle(predicted_bytes: float) -> None:
     """
-    Called before queueing work. Blocks until the measured private RSS growth
-    of all workers plus the predicted peak cost of the new work item fits
-    under the memory limit. Because the check is a live measurement, workers
-    that finish items free memory and unblock the producer.
+    Called before queueing work. Two guards, in order:
+
+    1. OOM guard (always on): while system-wide memory use is at/above 95%
+       of physical RAM, no work is queued. If the system stays pinned there
+       for OOM_STALL_ABORT_SECONDS, remaining work is abandoned (WorkAborted)
+       rather than risking an out-of-memory kill.
+    2. Memory governor (if enabled via --mem_limit): blocks while the measured
+       private RSS growth of all workers plus the predicted peak cost of the
+       new work item fits under the memory limit.
+
+    Checks use cached measurements on the hot path; re-measure fresh only
+    while waiting, so draining workers unblock a blocked producer.
     """
+    if memory_pressured():
+        stalled_since = time.monotonic()
+        while memory_pressured(max_age=0):
+            if time.monotonic() - stalled_since > OOM_STALL_ABORT_SECONDS:
+                sys.stderr.write('[REPHRASER] Memory pinned at ' + str(int(OOM_GUARD_THRESHOLD * 100)) + '%+ for ' + str(OOM_STALL_ABORT_SECONDS) + 's; abandoning remaining work to avoid out-of-memory\n')
+                raise WorkAborted()
+            time.sleep(0.25)
     if MEM_LIMIT_BYTES <= 0 or WORKITEM_BYTES <= 0:
         return
     # Cheap cached check on the hot path; re-measure fresh only while
@@ -403,31 +458,34 @@ def main():
     # Iterate on all keys in chain model, handling most likely key (start of sentence) first
     if DCT is None:
         raise RuntimeError("DCT is not initialized")
-    if args.ngrams == 2:
-        traverselikely(mpqueue, (BEGIN, BEGIN), args.words, args.batchdepth, [])
-    elif args.ngrams == 3:
-        traverselikely(mpqueue, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
-    for key in DCT:
-        if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
-            continue
-        # Need to convert string keys back into tuples for programmatic use
-        tuplekey = tuple(key.split(' ', args.ngrams - 1))
-        if END in tuplekey:
-            continue
-        prefix_normal = list(tuplekey)
-        prefixmod = args.ngrams
-        if tuplekey[0] == BEGIN:
-            prefixmod = args.ngrams - 1
-            prefix_normal = list(tuplekey[1:])
-        if tuplekey[1] == BEGIN and args.ngrams > 2:
-            prefixmod = args.ngrams - 2
-            prefix_normal = list(tuplekey[2:])
-        # Handle the common-case where the tuplekey puts us below the batchdepth
-        if args.words - prefixmod <= args.batchdepth:
-            throttle(item_bytes(args.words - prefixmod - 1))
-            mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
-        else:
-            traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
+    try:
+        if args.ngrams == 2:
+            traverselikely(mpqueue, (BEGIN, BEGIN), args.words, args.batchdepth, [])
+        elif args.ngrams == 3:
+            traverselikely(mpqueue, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
+        for key in DCT:
+            if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
+                continue
+            # Need to convert string keys back into tuples for programmatic use
+            tuplekey = tuple(key.split(' ', args.ngrams - 1))
+            if END in tuplekey:
+                continue
+            prefix_normal = list(tuplekey)
+            prefixmod = args.ngrams
+            if tuplekey[0] == BEGIN:
+                prefixmod = args.ngrams - 1
+                prefix_normal = list(tuplekey[1:])
+            if tuplekey[1] == BEGIN and args.ngrams > 2:
+                prefixmod = args.ngrams - 2
+                prefix_normal = list(tuplekey[2:])
+            # Handle the common-case where the tuplekey puts us below the batchdepth
+            if args.words - prefixmod <= args.batchdepth:
+                throttle(item_bytes(args.words - prefixmod - 1))
+                mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
+            else:
+                traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
+    except WorkAborted:
+        pass  # Workers already drain their queued work; output continues below
 
     # Wrap up, send end-of-work signals to workers (one each)
     for worker in worker_processes:
