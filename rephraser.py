@@ -10,6 +10,7 @@ import multiprocessing as mp
 import os
 import sys
 import time
+from functools import lru_cache
 from importlib.metadata import version
 from signal import SIGINT, signal
 
@@ -152,6 +153,7 @@ def get_version() -> str:
     return version('rephraser')
 
 
+@lru_cache(maxsize=65536)  # Model vocabulary is small relative to chain count; bounded to cap memory
 def sanitizeandmutateword(word: str) -> str:
     """
     Capitalize the first letter
@@ -193,7 +195,7 @@ def collectall(state: list, depth: int, func_prefix: list):
         for word in func_prefix:
             mutated_prefix.append(sanitizeandmutateword(word))
         for nextword in cstate_model[0]:
-            if nextword not in [END, '']:
+            if nextword not in (END, ''):
                 mutated_word = sanitizeandmutateword(nextword)
                 if mutated_word != '':
                     yield mutated_prefix + [mutated_word]
@@ -225,29 +227,34 @@ def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False, flush_l
                 if not gpusaturated:
                     lines.append(' '.join(outlist) + '\n')
                 else:
-                    space_joined = ' '.join(outlist)
-                    no_space = ''.join(outlist)
                     first, *rest = outlist
                     rest_space = ' '.join(rest)
-                    rest_no_space = ''.join(rest)
+                    first_lower = first.lower()
                     rest_lower_space = rest_space.lower()
-                    rest_lower_no_space = rest_no_space.lower()
+                    # Model tokens never contain spaces, so the no-space
+                    # lowercase variants derive from the spaced ones for free.
+                    rest_lower_no_space = rest_lower_space.replace(' ', '')
+                    space_joined = first + ' ' + rest_space
+                    rest_no_space = ''.join(rest)
+                    no_space = first + rest_no_space
+                    space_joined_lower = space_joined.lower()
+                    no_space_lower = space_joined_lower.replace(' ', '')
                     # Titlecase with spaces
                     lines.append(space_joined + '\n')
                     # Titlecase without spaces
                     lines.append(no_space + '\n')
                     # Lowercase with spaces
-                    lines.append(space_joined.lower() + '\n')
+                    lines.append(space_joined_lower + '\n')
                     # Lowercase without spaces
-                    lines.append(no_space.lower() + '\n')
+                    lines.append(no_space_lower + '\n')
                     # First letter capitalized with spaces
                     lines.append(first + ' ' + rest_lower_space + '\n')
                     # First letter capitalized without spaces
                     lines.append(first + rest_lower_no_space + '\n')
                     # Camelcase with spaces
-                    lines.append(first.lower() + ' ' + rest_space + '\n')
+                    lines.append(first_lower + ' ' + rest_space + '\n')
                     # Camelcase without spaces
-                    lines.append(first.lower() + rest_no_space + '\n')
+                    lines.append(first_lower + rest_no_space + '\n')
                 if len(lines) >= flush_lines:
                     flushlines()
             flushlines()
