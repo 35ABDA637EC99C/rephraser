@@ -19,7 +19,7 @@ import orjson
 BEGIN = '___BEGIN__'
 END = '___END__'
 DONE = '___DONE__'
-undesirable_chars: tuple[str, ...] = (',','.',';',':','?','\'','"')
+undesirable_chars: tuple[str, ...] = (',','.',';',':','?','\'','"','`')
 
 DCT = None  # Global dictionary for Markov model data
 mpqueue = None # Work queue
@@ -37,6 +37,8 @@ _avg_branch = 1.0  # Sampled average branching factor of the model (set by estim
 _bytes_per_chain = 0.0  # Sampled average bytes per generated chain
 worker_pids: list[int] = []  # PIDs of worker processes
 _worker_base_rss: dict[int, int] = {}  # Idle RSS per worker, so only private growth counts
+_cached_extra_rss = 0  # Last measured combined worker RSS growth
+_last_measure_time = 0.0  # monotonic time of the last measurement (0 = never)
 
 
 def get_total_memory() -> int:
@@ -61,19 +63,28 @@ def process_rss(pid: int) -> int:
     return 0
 
 
-def worker_extra_rss() -> int:
+def worker_extra_rss(max_age: float = 0.05) -> int:
     """
     Sum of private RSS growth across all workers: each worker's current RSS
     minus its idle baseline. Workers are forked from the parent, so their RSS
     includes shared model pages; subtracting each worker's own baseline keeps
     those shared pages from being counted once per worker. Exited workers
     report RSS 0 and contribute nothing.
+
+    Measurements are cached for max_age seconds so per-put calls are cheap;
+    pass max_age=0 to force a fresh read (used inside the throttle wait loop).
     """
+    global _cached_extra_rss, _last_measure_time
+    now = time.monotonic()
+    if _last_measure_time > 0 and now - _last_measure_time < max_age:
+        return _cached_extra_rss
     total = 0
     for pid, base in _worker_base_rss.items():
         rss = process_rss(pid)
         if rss > base:
             total += rss - base
+    _cached_extra_rss = total
+    _last_measure_time = now
     return total
 
 
@@ -130,7 +141,11 @@ def throttle(predicted_bytes: float) -> None:
     """
     if MEM_LIMIT_BYTES <= 0 or WORKITEM_BYTES <= 0:
         return
-    while worker_extra_rss() + predicted_bytes >= MEM_LIMIT_BYTES:
+    # Cheap cached check on the hot path; re-measure fresh only while
+    # waiting, so draining workers unblock a blocked producer.
+    if worker_extra_rss() + predicted_bytes < MEM_LIMIT_BYTES:
+        return
+    while worker_extra_rss(max_age=0) + predicted_bytes >= MEM_LIMIT_BYTES:
         time.sleep(0.05)
 
 
