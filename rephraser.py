@@ -38,7 +38,7 @@ _queued_bytes = 0.0  # Producer-side estimate of bytes of work currently sitting
 _last_qsize = 0  # Queue size seen at the previous governor check, to detect consumed items
 _start_time = 0.0  # monotonic time production started, for the startup grace period
 START_GRACE_SECONDS = 30  # No throttling during the first N seconds so output starts fast
-OUTPUT_FLUSH_LINES = 1024  # Worker line-buffer size: one stdout write per N chains
+OUTPUT_FLUSH_LINES = 512  # Worker line-buffer size: one stdout write per N chains
 _avg_branch = 1.0  # Sampled average branching factor of the model (set by estimate_workitem_bytes)
 _bytes_per_chain = 0.0  # Sampled average bytes per generated chain
 worker_pids: list[int] = []  # PIDs of worker processes, for RSS summation
@@ -245,7 +245,7 @@ def collectall(state: list, depth: int, func_prefix: list):
                 if mutated_word != '':
                     yield mutated_prefix + [mutated_word]
 
-def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None:
+def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False, flush_lines: int = OUTPUT_FLUSH_LINES) -> None:
     """Worker function to collect all chains of a certain depth, and output them in titlecase"""
     # Landing function for workers
     while True:
@@ -295,7 +295,7 @@ def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None
                     lines.append(first.lower() + ' ' + rest_space + '\n')
                     # Camelcase without spaces
                     lines.append(first.lower() + rest_no_space + '\n')
-                if len(lines) >= OUTPUT_FLUSH_LINES:
+                if len(lines) >= flush_lines:
                     flushlines()
             flushlines()
 
@@ -350,6 +350,7 @@ def main():
     parser.add_argument('--gpusaturated', '-s', action='store_true', help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes', default=False)
     parser.add_argument('--batchdepth', '-b', type=int, help='Number of ending words/recursions that should be handled in bulk by performing "collectall"', default=3)
     parser.add_argument('--mem_limit', type=int, help='Percentage of physical RAM the memory governor aims to stay under while queueing work (0 disables the governor)', default=70)
+    parser.add_argument('--flush_lines', type=int, help='Number of output lines workers buffer before writing to stdout in a single batch', default=OUTPUT_FLUSH_LINES)
 
     args = parser.parse_args()
 
@@ -415,7 +416,7 @@ def main():
     # Spin up workers once and early
     worker_processes = []
     for i in range(worker_num):
-        worker = mp.Process(target=workercollectall, args=(mpqueue, GPUSATURATED))
+        worker = mp.Process(target=workercollectall, args=(mpqueue, GPUSATURATED, args.flush_lines))
         worker.daemon = True
         worker.start()
         worker_processes.append(worker)
