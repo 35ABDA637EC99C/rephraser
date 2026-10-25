@@ -18,7 +18,7 @@ import markovify  # type: ignore[import-untyped]  # ty: ignore[unresolved-import
 BEGIN = '___BEGIN__'
 END = '___END__'
 DONE = '___DONE__'
-undesirable_chars = [',','.',';',':','?','\'','"','"','"','"']
+undesirable_chars: tuple[str, ...] = (',','.',';',':','?','\'','"')
 
 DCT = None  # Global dictionary for Markov model data
 DCT_KEYS: set[str] = set()  # Global set of all dictionary keys for iteration
