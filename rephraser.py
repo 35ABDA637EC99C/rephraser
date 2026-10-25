@@ -33,7 +33,6 @@ worker_num = 0  # Will be changed before creating workers
 MEM_LIMIT_BYTES = 0  # Hard byte limit for combined worker RSS growth (0 = governor disabled)
 TOTAL_MEM = 0  # Total physical memory in bytes (0 = unknown, governor disabled)
 WORKITEM_BYTES = 0  # Predicted peak memory cost of a single queued work item
-OUTPUT_FLUSH_LINES = 512  # Worker line-buffer size: one stdout write per N chains
 _avg_branch = 1.0  # Sampled average branching factor of the model (set by estimate_workitem_bytes)
 _bytes_per_chain = 0.0  # Sampled average bytes per generated chain
 worker_pids: list[int] = []  # PIDs of worker processes
@@ -199,7 +198,7 @@ def collectall(state: list, depth: int, func_prefix: list):
                 if mutated_word != '':
                     yield mutated_prefix + [mutated_word]
 
-def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False, flush_lines: int = OUTPUT_FLUSH_LINES) -> None:
+def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False, flush_lines: int = 1) -> None:
     """Worker function to collect all chains of a certain depth, and output them in titlecase"""
     # Landing function for workers
     while True:
@@ -303,7 +302,7 @@ def main():
     parser.add_argument('--gpusaturated', '-s', action='store_true', help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes', default=False)
     parser.add_argument('--batchdepth', '-b', type=int, help='Number of ending words/recursions that should be handled in bulk by performing "collectall"', default=3)
     parser.add_argument('--mem_limit', type=int, help='Percentage of physical RAM the memory governor aims to stay under while queueing work (0 disables the governor)', default=70)
-    parser.add_argument('--flush_lines', type=int, help='Number of output lines workers buffer before writing to stdout in a single batch', default=OUTPUT_FLUSH_LINES)
+    parser.add_argument('--flush_lines', type=int, help='Number of output lines workers buffer before writing to stdout in a single batch', default=512)
 
     args = parser.parse_args()
 
