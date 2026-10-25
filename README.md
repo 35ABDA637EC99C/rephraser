@@ -1,8 +1,12 @@
 ### RePhraser
 
+#### Install
+
+`uv tool install git+https://github.com/35ABDA637EC99C/rephraser.git`
+
 #### Usage:
 
-As with most sane programs, `python3 rephraser.py -h` will list arguments it can take.
+As with most sane programs, `uv run rephraser.py -h` will list arguments it can take.
 
 1. Get a corpus of sentences (or just a large text, like a text format ebook) to work with, I recommend choosing a file 
  from https://wortschatz.uni-leipzig.de/en/download/ and extracting the "sentences" file inside it (you should remove line
@@ -10,7 +14,7 @@ As with most sane programs, `python3 rephraser.py -h` will list arguments it can
 
 2. Then call RePhraser on it, piping the output to hashcat (I hope you have sufficient RAM, Markov models are memory-heavy to generate). 
   E.g. :
-  `python3 rephraser.py --corpus sentences-eng_wikipedia_2016_1M --model ./wiki1M_model.keyvi | hashcat -m 1000 -O -D 2 -w 4 --status --status-timer=60 --username -r ./rephraserBasic8.rule -r ~/travco_princev8.rule ./NTLMHashfile`
+  `uv run rephraser.py --corpus sentences-eng_wikipedia_2016_1M --model ./wiki1M_model.keyvi | hashcat -m 1000 -O -r rephraser.rule ./NTLMHashfile`
 
 3. Profit
 
@@ -36,12 +40,12 @@ Can be easy to remember if you say them to yourself "A diabetic-unicorn is trapp
 
 #### Dependencies:
 
-- [Markovify](https://github.com/jsvine/markovify) `pip3 install markovify` for initial creation and compilation of Markov Chains
-- [Keyvi](https://github.com/KeyviDev/keyvi) `pip3 install keyvi` for efficient storage and shared-memory access by multiple processes
+- [Markovify](https://github.com/jsvine/markovify) for initial creation and compilation of Markov Chains
+- [Keyvi](https://github.com/KeyviDev/keyvi) for efficient storage and shared-memory access by multiple processes
 	 - [cmake](https://gitlab.kitware.com/cmake/cmake)  (apt package usually is `cmake`)
 		 - [libboost](https://gitlab.kitware.com/cmake/cmake/issues/19402) (apt package usually is `libboost-all-dev`)
 	 - [snappy](https://github.com/google/snappy) (apt package usually is `libsnappy-dev`)
-- **Python 3.9+** 
+- **Python 3.10+** 
 
 #### Other file in this repo:
 - `rephraser.rule` Rules to alter rephraser's output into different common patterns of capitalization and spaces within hashcat

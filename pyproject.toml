@@ -13,8 +13,8 @@ authors = [
     { name = "Travis Palmer" },
 ]
 dependencies = [
-    "keyvi",
-    "markovify",
+    "keyvi<=0.7.7",
+    "markovify<0.9.4",
 ]
 
 [project.scripts]
