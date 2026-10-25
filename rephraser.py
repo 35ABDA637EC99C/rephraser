@@ -26,42 +26,28 @@ mpqueue = None # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
 
-# Memory governor state (parent-side): keeps predicted memory usage below a
-# fraction of physical RAM by pausing the work producer while workers drain
-# the queue. Output still flows while paused, so downstream consumers
-# (hashcat) keep receiving input.
-MEM_TARGET = 0.70  # Fraction of physical RAM we aim to stay under
+# Memory governor state (parent-side): keeps the combined private memory growth
+# of all workers under a fraction of physical RAM by pausing the work producer
+# while workers process and drain their items. Output still flows while paused,
+# so downstream consumers (hashcat) keep receiving input.
+MEM_LIMIT_BYTES = 0  # Hard byte limit for combined worker RSS growth (0 = governor disabled)
 TOTAL_MEM = 0  # Total physical memory in bytes (0 = unknown, governor disabled)
 WORKITEM_BYTES = 0  # Predicted peak memory cost of a single queued work item
-MEM_BASELINE = 0  # RSS of the process tree before any work is queued (model + idle workers)
-_queued_bytes = 0.0  # Producer-side estimate of bytes of work currently sitting on the queue
-_last_qsize = 0  # Queue size seen at the previous governor check, to detect consumed items
-_start_time = 0.0  # monotonic time production started, for the startup grace period
-START_GRACE_SECONDS = 30  # No throttling during the first N seconds so output starts fast
 OUTPUT_FLUSH_LINES = 512  # Worker line-buffer size: one stdout write per N chains
 _avg_branch = 1.0  # Sampled average branching factor of the model (set by estimate_workitem_bytes)
 _bytes_per_chain = 0.0  # Sampled average bytes per generated chain
-worker_pids: list[int] = []  # PIDs of worker processes, for RSS summation
-_put_counter = 0  # Cheap-check counter so we don't stat /proc on every put
-_cached_rss_growth = 0  # Last measured tree RSS growth above the baseline
+worker_pids: list[int] = []  # PIDs of worker processes
+_worker_base_rss: dict[int, int] = {}  # Idle RSS per worker, so only private growth counts
 
 
-def get_available_memory() -> int:
+def get_total_memory() -> int:
     """
-    Return currently available physical memory (excluding swap) in bytes, or 1000000000 (1GB)
-    if it cannot be determined. Falls back to total physical RAM via sysconf,
-    which also excludes swap but ignores current usage, so it can overestimate
-    what is actually free.
+    Return total physical memory in bytes, or 0 if it cannot be determined.
     """
     try:
-        with open('/proc/meminfo', encoding='ascii') as f:
-            for line in f:
-                if line.startswith('MemAvailable:'):
-                    return int(line.split()[1]) * 1024
-    except (ValueError, OSError, AttributeError):
         return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
-
-    return 1000000000
+    except (ValueError, OSError):
+        return 0
 
 
 def process_rss(pid: int) -> int:
@@ -76,18 +62,20 @@ def process_rss(pid: int) -> int:
     return 0
 
 
-def tree_rss() -> int:
-    """Sum RSS of the parent (which holds the model) and all workers"""
-    rss: int = process_rss(os.getpid())
-    for pid in worker_pids:
-        rss += process_rss(pid)
-    return rss
-
-
-def _measure_rss_growth() -> int:
-    """Tree RSS growth above the pre-production baseline, floored at 0"""
-    growth = tree_rss() - MEM_BASELINE
-    return max(growth, 0)
+def worker_extra_rss() -> int:
+    """
+    Sum of private RSS growth across all workers: each worker's current RSS
+    minus its idle baseline. Workers are forked from the parent, so their RSS
+    includes shared model pages; subtracting each worker's own baseline keeps
+    those shared pages from being counted once per worker. Exited workers
+    report RSS 0 and contribute nothing.
+    """
+    total = 0
+    for pid, base in _worker_base_rss.items():
+        rss = process_rss(pid)
+        if rss > base:
+            total += rss - base
+    return total
 
 
 def estimate_workitem_bytes(batchdepth: int) -> int:
@@ -134,51 +122,17 @@ def item_bytes(depth: int) -> float:
     return expected_chains * _bytes_per_chain * 2
 
 
-def _reconcile_queue_bytes(qsize: int) -> None:
-    """Account for items workers consumed since the last check"""
-    global _queued_bytes, _last_qsize
-    consumed = _last_qsize - qsize
-    if consumed > 0:
-        _queued_bytes -= consumed * WORKITEM_BYTES
-        if _queued_bytes < 0:
-            _queued_bytes = 0.0
-    _last_qsize = qsize
-
-
-def current_qsize() -> int:
-    """Queue length, or 0 if qsize() is unsupported on this platform"""
-    if mpqueue is None:
-        return 0
-    try:
-        return mpqueue.qsize()
-    except NotImplementedError:
-        return 0
-
-
-def throttle() -> None:
+def throttle(predicted_bytes: float) -> None:
     """
-    Called before queueing work. Guarantees that no work item is queued while
-    predicted memory usage is at/above the target: the check runs before every
-    single put, using a cheap cached estimate (last measured RSS growth plus
-    the tracked queue bytes). The expensive /proc re-measure happens every 32
-    puts to keep overhead negligible, and inside the wait loop so blocked
-    producers react as workers drain the queue. During the startup grace
-    period the /proc re-measure runs on every put instead (still cheap), so
-    the cached growth value starts out accurate.
+    Called before queueing work. Blocks until the measured private RSS growth
+    of all workers plus the predicted peak cost of the new work item fits
+    under the memory limit. Because the check is a live measurement, workers
+    that finish items free memory and unblock the producer.
     """
-    global _put_counter, _cached_rss_growth
-    _put_counter += 1
-    if TOTAL_MEM <= 0 or WORKITEM_BYTES <= 0 or MEM_TARGET <= 0:
+    if MEM_LIMIT_BYTES <= 0 or WORKITEM_BYTES <= 0:
         return
-    limit = TOTAL_MEM * MEM_TARGET
-    in_grace = time.monotonic() - _start_time < START_GRACE_SECONDS
-    if _put_counter % 32 == 0 or in_grace:
-        _reconcile_queue_bytes(current_qsize())
-        _cached_rss_growth = _measure_rss_growth()
-    while _cached_rss_growth + int(_queued_bytes) >= limit:
-        _reconcile_queue_bytes(current_qsize())
-        _cached_rss_growth = _measure_rss_growth()
-        time.sleep(0.002)
+    while worker_extra_rss() + predicted_bytes >= MEM_LIMIT_BYTES:
+        time.sleep(0.05)
 
 
 try:
@@ -304,7 +258,6 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
     Traverse the Markov model in order of most likely next word,
     until a certain depth, at which point put work on the queue for workers to handle in bulk
     """
-    global _queued_bytes
     # Sort and traverse from at least the most common start-points
     if func_prefix is None:
         func_prefix = []
@@ -325,9 +278,9 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             if nextword == END:
                 continue
             nextstate = tuple(state[1:]) + (nextword,)
-            # Parallelize below batchdepth
-            throttle()
-            _queued_bytes += item_bytes(depthremaining - 1)
+            # Parallelize below batchdepth; wait until worker memory headroom
+            # allows this item's predicted peak cost.
+            throttle(item_bytes(depthremaining - 1))
             func_mpqueue.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
     else:
         for wordindex in stateweights:
@@ -339,7 +292,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 def main():
-    global DCT_KEYS, DCT, mpqueue, worker_num, MEM_TARGET, TOTAL_MEM, WORKITEM_BYTES, worker_pids, MEM_BASELINE, _queued_bytes, _start_time  # noqa: PLW0602
+    global DCT_KEYS, DCT, mpqueue, worker_num, MEM_LIMIT_BYTES, TOTAL_MEM, WORKITEM_BYTES, worker_pids, _worker_base_rss  # noqa: PLW0602
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (gzip-compressed JSON, make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
@@ -396,19 +349,18 @@ def main():
 
     # Initialize the memory governor sizing before creating the queue, so the
     # queue cap can be derived from the per-work-item memory estimate.
-    TOTAL_MEM = get_available_memory()
-    if args.mem_limit > 0:
-        MEM_TARGET = args.mem_limit / 100
-    else:
-        MEM_TARGET = 0  # disables throttle entirely
+    TOTAL_MEM = get_total_memory()
     WORKITEM_BYTES = estimate_workitem_bytes(args.batchdepth)
+    if args.mem_limit > 0 and TOTAL_MEM > 0 and WORKITEM_BYTES > 0:
+        MEM_LIMIT_BYTES = int(TOTAL_MEM * args.mem_limit / 100)
+    else:
+        MEM_LIMIT_BYTES = 0  # disables the governor
     queue_capacity = MAXQUEUESIZE
-    if TOTAL_MEM > 0 and WORKITEM_BYTES > 0 and MEM_TARGET > 0:
-        # Hard safety net: cap the queue so a full queue can never exceed a
-        # quarter of the target headroom, leaving the rest for in-flight
+    if MEM_LIMIT_BYTES > 0:
+        # Hard safety net: cap the queue so buffered work items can never
+        # exceed a quarter of the limit, leaving the rest for in-flight
         # expansion inside workers.
-        headroom = int(TOTAL_MEM * MEM_TARGET * 0.25)
-        queue_capacity = max(1, min(MAXQUEUESIZE, headroom // WORKITEM_BYTES))
+        queue_capacity = max(1, min(MAXQUEUESIZE, (MEM_LIMIT_BYTES // 4) // WORKITEM_BYTES))
         if queue_capacity < MAXQUEUESIZE:
             sys.stderr.write('[REPHRASER] Queue capacity limited to ' + str(queue_capacity) + ' items by memory governor\n')
     mpqueue = mp.Queue(queue_capacity)
@@ -424,18 +376,15 @@ def main():
     # Change signal handling in only parent
     signal(SIGINT, sigint_handler)
 
-    # Initialize the memory governor: track RSS of parent (model) plus workers
-    # against the RAM target. Sizing (TOTAL_MEM, MEM_TARGET, WORKITEM_BYTES)
-    # was computed before the queue was created.
+    # Initialize the memory governor: each worker's idle RSS becomes its
+    # baseline, so only private growth from processing work counts toward
+    # the limit (shared, copy-on-write model pages are not double-counted).
     worker_pids = [w.pid for w in worker_processes if w.pid is not None]
-    # Baseline = RSS of parent (model) plus freshly started (idle) workers, so
-    # the governor only reacts to memory growth caused by queued work.
-    MEM_BASELINE = tree_rss()
-    _start_time = time.monotonic()
-    if TOTAL_MEM > 0:
-        sys.stderr.write('[REPHRASER] Memory governor active: target ' + str(args.mem_limit) + '% of ' + str(TOTAL_MEM // (1024 * 1024)) + ' MiB available, estimated ' + str(WORKITEM_BYTES // 1024) + ' KiB per work item\n')
+    _worker_base_rss = {pid: process_rss(pid) for pid in worker_pids}
+    if MEM_LIMIT_BYTES > 0:
+        sys.stderr.write('[REPHRASER] Memory governor active: workers limited to ' + str(args.mem_limit) + '% of ' + str(TOTAL_MEM // (1024 * 1024)) + ' MiB RAM, estimated ' + str(WORKITEM_BYTES // 1024) + ' KiB per work item\n')
     else:
-        sys.stderr.write('[REPHRASER] Could not determine available system memory, memory governor disabled\n')
+        sys.stderr.write('[REPHRASER] Memory governor disabled\n')
 
     
     # Iterate on all keys in chain model, handling most likely key (start of sentence) first
@@ -462,7 +411,7 @@ def main():
             prefix_normal = list(tuplekey[2:])
         # Handle the common-case where the tuplekey puts us below the batchdepth
         if args.words - prefixmod <= args.batchdepth:
-            _queued_bytes += item_bytes(args.words - prefixmod - 1)
+            throttle(item_bytes(args.words - prefixmod - 1))
             mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
         else:
             traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
