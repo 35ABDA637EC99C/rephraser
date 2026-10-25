@@ -44,19 +44,22 @@ worker_pids: list[int] = []  # PIDs of worker processes, for RSS summation
 _put_counter = 0  # Cheap-check counter so we don't stat /proc on every put
 
 
-def get_total_memory() -> int:
-    """Return total physical memory in bytes, or 0 if it cannot be determined"""
+def get_available_memory() -> int:
+    """
+    Return currently available physical memory (excluding swap) in bytes, or 1000000000 (1GB)
+    if it cannot be determined. Falls back to total physical RAM via sysconf,
+    which also excludes swap but ignores current usage, so it can overestimate
+    what is actually free.
+    """
     try:
         with open('/proc/meminfo', encoding='ascii') as f:
             for line in f:
-                if line.startswith('MemTotal:'):
+                if line.startswith('MemAvailable:'):
                     return int(line.split()[1]) * 1024
-    except (OSError, ValueError):
-        pass
-    try:
-        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
     except (ValueError, OSError, AttributeError):
-        return 0
+        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+
+    return 1000000000
 
 
 def process_rss(pid: int) -> int:
@@ -408,7 +411,7 @@ def main():
 
     # Initialize the memory governor: predict per-work-item memory cost from the
     # model and track RSS of parent (model) plus workers against the RAM target.
-    TOTAL_MEM = get_total_memory()
+    TOTAL_MEM = get_available_memory()
     if args.mem_limit > 0:
         MEM_TARGET = args.mem_limit / 100
     else:
@@ -420,9 +423,9 @@ def main():
     MEM_BASELINE = tree_rss()
     _start_time = time.monotonic()
     if TOTAL_MEM > 0:
-        sys.stderr.write('[REPHRASER] Memory governor active: target ' + str(args.mem_limit) + '% of ' + str(TOTAL_MEM // (1024 * 1024)) + ' MiB, estimated ' + str(WORKITEM_BYTES // 1024) + ' KiB per work item\n')
+        sys.stderr.write('[REPHRASER] Memory governor active: target ' + str(args.mem_limit) + '% of ' + str(TOTAL_MEM // (1024 * 1024)) + ' MiB available, estimated ' + str(WORKITEM_BYTES // 1024) + ' KiB per work item\n')
     else:
-        sys.stderr.write('[REPHRASER] Could not determine total system memory, memory governor disabled\n')
+        sys.stderr.write('[REPHRASER] Could not determine available system memory, memory governor disabled\n')
 
     if args.freqlist != '':
         # Iterate on most-frequently used words input, as long as they in the model
