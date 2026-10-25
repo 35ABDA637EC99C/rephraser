@@ -344,48 +344,18 @@ def main():
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (gzip-compressed JSON, make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
     parser.add_argument('--ngrams', '-g', type=int, help='Number of words (n-grams) that make up a state in the Markov model, it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM, and 3 for the better linguistic accuracy', choices=[2, 3], default=2)
     parser.add_argument('--corpus', '-c', help='Path to a corpus (file with sentences) to convert into a Markov model', default='')
-    parser.add_argument('--corpusisdir', '-d', action='store_true', help='Handle the "--corpus" path as a directory, and create a model by walking all files inside', default=False)
     parser.add_argument('--words', '-w', type=int, help='Number of words in outputtable candidates', default=4)
     parser.add_argument('--workers', '-x', type=int, help='Manually specify the number of workers', default=mp.cpu_count() - 1)
     parser.add_argument('--freqlist', '-f', help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words), to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find all chain start-points (in order) depending on model * freqlist size.', default='')
     parser.add_argument('--gpusaturated', '-s', action='store_true', help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes', default=False)
     parser.add_argument('--batchdepth', '-b', type=int, help='Number of ending words/recursions that should be handled in bulk by performing "collectall"', default=3)
-    parser.add_argument('--mem-limit', type=int, help='Percentage of physical RAM the memory governor aims to stay under while queueing work (0 disables the governor)', default=80)
+    parser.add_argument('--mem_limit', type=int, help='Percentage of physical RAM the memory governor aims to stay under while queueing work (0 disables the governor)', default=80)
 
     args = parser.parse_args()
 
     # Sanity checks, and model load/creation
     if args.corpus != '' and args.model != '':
-        if args.corpusisdir and os.path.isdir(args.corpus):
-            # Load multi-file corpus from --corpus
-            COMBINED_MODEL = None
-            mmodel = None
-            for (dirpath, _, filenames) in os.walk(args.corpus):
-                for filename in filenames:
-                    sys.stderr.write('[REPHRASER] Loading ' + os.path.join(dirpath, filename) + ' ...')
-                    with open(os.path.join(dirpath, filename), encoding='utf-8', errors='ignore') as f:
-                        mmodel = markovify.Text(f, retain_original=False, state_size=args.ngrams)
-                        if COMBINED_MODEL:
-                            sys.stderr.write('[REPHRASER] Combining ' + os.path.join(dirpath, filename) + ' ...')
-                            COMBINED_MODEL = markovify.combine(models=[COMBINED_MODEL, mmodel])
-                        else:
-                            COMBINED_MODEL = mmodel
-            if mmodel is not None:
-                del mmodel
-            if COMBINED_MODEL is None:
-                sys.stderr.write('[REPHRASER] No files found in directory ' + args.corpus + ' Exiting!\n')
-                sys.exit(1)
-            COMBINED_MODEL.compile(inplace=True)
-            DCT = {}
-            DCT_KEYS.clear()
-            for key in COMBINED_MODEL.chain.model:
-                key_str = ' '.join(key)
-                DCT_KEYS.add(key_str)
-                DCT[key_str] = list(COMBINED_MODEL.chain.model[key])
-            del COMBINED_MODEL
-            with gzip.open(args.model, 'wt', encoding='utf-8') as f:
-                json.dump(DCT, f)
-        elif os.path.isfile(args.corpus):
+        if os.path.isfile(args.corpus):
             # Load single-file corpus from --corpus
             with open(args.corpus, encoding='utf-8', errors='ignore') as f:
                 mmodel = markovify.Text(f, retain_original=False, state_size=args.ngrams)
