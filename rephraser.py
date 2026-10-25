@@ -113,7 +113,7 @@ def estimate_workitem_bytes(batchdepth: int) -> int:
         for word in words:
             wordlen_total += len(word)
             word_count += 1
-        if sampled_states >= 20000:
+        if sampled_states >= 2000:
             break
     if sampled_states == 0 or word_count == 0:
         return 0
@@ -261,38 +261,36 @@ def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None
             outchains: list[list[str]] = collectall(state, depth, prefix)
             # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
             if not gpusaturated:
-                for outlist in outchains:
-                    # Titlecase with spaces
-                    sys.stdout.write(' '.join(outlist) + '\n')
-                    sys.stdout.flush()
+                lines = [' '.join(outlist) + '\n' for outlist in outchains]
             else:
+                lines = []
                 for outlist in outchains:
                     space_joined = ' '.join(outlist)
                     no_space = ''.join(outlist)
-                    lower_space = space_joined.lower()
-                    lower_no_space = no_space.lower()
                     first, *rest = outlist
                     rest_space = ' '.join(rest)
                     rest_no_space = ''.join(rest)
                     rest_lower_space = rest_space.lower()
                     rest_lower_no_space = rest_no_space.lower()
                     # Titlecase with spaces
-                    sys.stdout.write(space_joined + '\n')
+                    lines.append(space_joined + '\n')
                     # Titlecase without spaces
-                    sys.stdout.write(no_space + '\n')
+                    lines.append(no_space + '\n')
                     # Lowercase with spaces
-                    sys.stdout.write(lower_space + '\n')
+                    lines.append(space_joined.lower() + '\n')
                     # Lowercase without spaces
-                    sys.stdout.write(lower_no_space + '\n')
+                    lines.append(no_space.lower() + '\n')
                     # First letter capitalized with spaces
-                    sys.stdout.write(first + ' ' + rest_lower_space + '\n')
+                    lines.append(first + ' ' + rest_lower_space + '\n')
                     # First letter capitalized without spaces
-                    sys.stdout.write(first + rest_lower_no_space + '\n')
+                    lines.append(first + rest_lower_no_space + '\n')
                     # Camelcase with spaces
-                    sys.stdout.write(first.lower() + ' ' + rest_space + '\n')
+                    lines.append(first.lower() + ' ' + rest_space + '\n')
                     # Camelcase without spaces
-                    sys.stdout.write(first.lower() + rest_no_space + '\n')
-                    sys.stdout.flush()
+                    lines.append(first.lower() + rest_no_space + '\n')
+            # One buffered write + flush per work item instead of per line
+            sys.stdout.write(''.join(lines))
+            sys.stdout.flush()
 
 def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list | None = None) -> None:
     """
@@ -300,8 +298,6 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
     until a certain depth, at which point put work on the queue for workers to handle in bulk
     """
     global _queued_bytes
-    # stateweights = [[weight, index], [weight, index]]
-    stateweights: list[list[int]] = []
     # Sort and traverse from at least the most common start-points
     if func_prefix is None:
         func_prefix = []
@@ -311,17 +307,14 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
     if state_key not in DCT:
         return
     cstate_model = DCT[state_key]
-    for weights in range(len(cstate_model[1])):
-        if weights == 0:
-            stateweights.append([cstate_model[1][weights], 0])
-        else:
-            stateweights.append([cstate_model[1][weights] - cstate_model[1][weights-1], weights])
-    stateweights.sort(reverse=True)
+    # Sort word indices by their standalone weight (cumulative minus previous)
+    weights = cstate_model[1]
+    stateweights = sorted(range(len(weights)), key=lambda i: weights[i] - (weights[i - 1] if i else 0), reverse=True)
 
     if depthremaining <= batchdepth:
-        for weighted in stateweights:
+        for wordindex in stateweights:
             # cstate_model[0 = words][wordindex]
-            nextword = cstate_model[0][weighted[1]]
+            nextword = cstate_model[0][wordindex]
             if nextword == END:
                 continue
             nextstate = tuple(state[1:]) + (nextword,)
@@ -330,9 +323,9 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             _queued_bytes += item_bytes(depthremaining - 1)
             func_mpqueue.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
     else:
-        for weighted in stateweights:
+        for wordindex in stateweights:
             # DCT[state][0 = words][wordindex]
-            nextword = cstate_model[0][weighted[1]]
+            nextword = cstate_model[0][wordindex]
             if nextword == END:
                 continue
             nextstate = tuple(state[1:]) + (nextword,)
