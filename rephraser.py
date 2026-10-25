@@ -9,7 +9,7 @@ import json
 import multiprocessing as mp
 import os
 import sys
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 from signal import SIGINT, signal
 
 import markovify  # type: ignore[import-untyped]  # ty: ignore[unresolved-import]
@@ -25,14 +25,11 @@ mpqueue = None # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
 
-if sys.platform == "darwin":
-  MAXQUEUESIZE=32767 #max allowed mp queue size on mac
-  mp.set_start_method("fork") #necessary for workers to inherit global vars on mac
-else:
-  try:
+
+try:
     mp.set_start_method("fork")
-  except RuntimeError:
-    pass  # fork is not available on this platform
+except RuntimeError:
+    sys.stderr.write('[REPHRASER] Fork start method not available, falling back to default.\n')
 
 def sigint_handler(signal_received, frame):
   # Parent *should* be able to exit
@@ -43,10 +40,8 @@ def sigint_handler(signal_received, frame):
 
 def get_version() -> str:
     """Read the installed package version from distribution metadata"""
-    try:
-        return version('rephraser')
-    except PackageNotFoundError:
-        return 'unknown'
+    
+    return version('rephraser')
 
 
 def sanitizeandmutateword(word: str) -> str:
