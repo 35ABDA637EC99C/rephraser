@@ -33,6 +33,13 @@ worker_num = 0  # Will be changed before creating workers
 MEM_TARGET = 0.80  # Fraction of physical RAM we aim to stay under
 TOTAL_MEM = 0  # Total physical memory in bytes (0 = unknown, governor disabled)
 WORKITEM_BYTES = 0  # Predicted peak memory cost of a single queued work item
+MEM_BASELINE = 0  # RSS of the process tree before any work is queued (model + idle workers)
+_queued_bytes = 0.0  # Producer-side estimate of bytes of work currently sitting on the queue
+_last_qsize = 0  # Queue size seen at the previous governor check, to detect consumed items
+_start_time = 0.0  # monotonic time production started, for the startup grace period
+START_GRACE_SECONDS = 30  # No throttling during the first N seconds so output starts fast
+_avg_branch = 1.0  # Sampled average branching factor of the model (set by estimate_workitem_bytes)
+_bytes_per_chain = 0.0  # Sampled average bytes per generated chain
 worker_pids: list[int] = []  # PIDs of worker processes, for RSS summation
 _put_counter = 0  # Cheap-check counter so we don't stat /proc on every put
 
@@ -73,24 +80,28 @@ def tree_rss() -> int:
 
 
 def predicted_usage() -> int:
-    """Current RSS of the process tree plus predicted memory of queued work items"""
-    if mpqueue is None:
-        return tree_rss()
-    try:
-        qsize: int = mpqueue.qsize()
-    except NotImplementedError:
-        qsize = 0
-    return tree_rss() + qsize * WORKITEM_BYTES
+    """
+    Predicted *incremental* memory above the pre-production baseline: growth of
+    the process tree RSS plus estimated bytes of work still sitting on the queue.
+    The baseline (model + idle workers) is subtracted so a large model does not
+    itself push the producer into permanent throttling.
+    """
+    growth: int = tree_rss() - MEM_BASELINE
+    growth = max(growth, 0)
+    return growth + int(_queued_bytes)
 
 
 def estimate_workitem_bytes(batchdepth: int) -> int:
     """
     Estimate the peak memory a single queued work item will cost when a worker
     expands it with collectall. Sampled from the model: average branching factor
-    gives the expected number of chains (branching ** batchdepth), each chain
+    gives the expected number of chains (branching ** depth), each chain
     costing roughly its words' characters plus per-string object overhead.
     Deliberately conservative (2x safety factor) since underestimating causes OOM.
+    Also stores the sampled stats in _avg_branch / _bytes_per_chain for use by
+    item_bytes(), which prices each queued item by its own depth.
     """
+    global _avg_branch, _bytes_per_chain
     if DCT is None or not DCT:
         return 0
     sampled_states = 0
@@ -110,9 +121,39 @@ def estimate_workitem_bytes(batchdepth: int) -> int:
         return 0
     avg_branch = min(branch_total / sampled_states, 100.0)  # cap pathological branching
     avg_wordlen = wordlen_total / word_count
+    _avg_branch = max(avg_branch, 1.0)
+    _bytes_per_chain = batchdepth * (avg_wordlen + 50) + 100  # str object overhead
     expected_chains = max(avg_branch ** max(batchdepth, 1), 1.0)
-    bytes_per_chain = batchdepth * (avg_wordlen + 50) + 100  # str object overhead
-    return int(expected_chains * bytes_per_chain * 2)
+    return int(expected_chains * _bytes_per_chain * 2)
+
+
+def item_bytes(depth: int) -> float:
+    """Estimated peak memory cost of one queued work item of the given depth"""
+    if WORKITEM_BYTES <= 0:
+        return 0.0
+    expected_chains = max(_avg_branch ** max(depth, 1), 1.0)
+    return expected_chains * _bytes_per_chain * 2
+
+
+def _reconcile_queue_bytes(qsize: int) -> None:
+    """Account for items workers consumed since the last check"""
+    global _queued_bytes, _last_qsize
+    consumed = _last_qsize - qsize
+    if consumed > 0:
+        _queued_bytes -= consumed * WORKITEM_BYTES
+        if _queued_bytes < 0:
+            _queued_bytes = 0.0
+    _last_qsize = qsize
+
+
+def current_qsize() -> int:
+    """Queue length, or 0 if qsize() is unsupported on this platform"""
+    if mpqueue is None:
+        return 0
+    try:
+        return mpqueue.qsize()
+    except NotImplementedError:
+        return 0
 
 
 def throttle() -> None:
@@ -120,16 +161,21 @@ def throttle() -> None:
     Called before queueing work. Blocks the producer while predicted memory
     usage is at/above the target, letting workers consume the queue (and emit
     output) until usage drops back under target. Checked only every 32 puts to
-    keep /proc stat overhead negligible.
+    keep /proc stat overhead negligible. Exempt during the startup grace period
+    so downstream consumers (hashcat) start receiving data immediately.
     """
     global _put_counter
     _put_counter += 1
-    if TOTAL_MEM <= 0 or WORKITEM_BYTES <= 0:
+    if TOTAL_MEM <= 0 or WORKITEM_BYTES <= 0 or MEM_TARGET <= 0:
+        return
+    if time.monotonic() - _start_time < START_GRACE_SECONDS:
+        _reconcile_queue_bytes(current_qsize())
         return
     if _put_counter % 32 != 0:
         return
     limit = TOTAL_MEM * MEM_TARGET
     while predicted_usage() >= limit:
+        _reconcile_queue_bytes(current_qsize())
         time.sleep(0.002)
 
 
@@ -252,6 +298,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
     Traverse the Markov model in order of most likely next word,
     until a certain depth, at which point put work on the queue for workers to handle in bulk
     """
+    global _queued_bytes
     # stateweights = [[weight, index], [weight, index]]
     stateweights: list[list[int]] = []
     # Sort and traverse from at least the most common start-points
@@ -279,6 +326,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             nextstate = tuple(state[1:]) + (nextword,)
             # Parallelize below batchdepth
             throttle()
+            _queued_bytes += item_bytes(depthremaining - 1)
             func_mpqueue.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
     else:
         for weighted in stateweights:
@@ -290,7 +338,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 def main():
-    global DCT_KEYS, DCT, mpqueue, worker_num, MEM_TARGET, TOTAL_MEM, WORKITEM_BYTES, worker_pids  # noqa: PLW0602
+    global DCT_KEYS, DCT, mpqueue, worker_num, MEM_TARGET, TOTAL_MEM, WORKITEM_BYTES, worker_pids, MEM_BASELINE, _queued_bytes, _start_time  # noqa: PLW0602
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (gzip-compressed JSON, make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
@@ -397,6 +445,10 @@ def main():
         MEM_TARGET = 0  # disables throttle entirely
     WORKITEM_BYTES = estimate_workitem_bytes(args.batchdepth)
     worker_pids = [w.pid for w in worker_processes if w.pid is not None]
+    # Baseline = RSS of parent (model) plus freshly started (idle) workers, so
+    # the governor only reacts to memory growth caused by queued work.
+    MEM_BASELINE = tree_rss()
+    _start_time = time.monotonic()
     if TOTAL_MEM > 0:
         sys.stderr.write('[REPHRASER] Memory governor active: target ' + str(args.mem_limit) + '% of ' + str(TOTAL_MEM // (1024 * 1024)) + ' MiB, estimated ' + str(WORKITEM_BYTES // 1024) + ' KiB per work item\n')
     else:
@@ -455,6 +507,7 @@ def main():
                 # Handle the common-case where the tuplekey puts us below the batchdepth
                 if args.words - prefixmod <= args.batchdepth:
                     throttle()
+                    _queued_bytes += item_bytes(args.words - prefixmod - 1)
                     mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
                 else:
                     traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
@@ -483,6 +536,7 @@ def main():
                 prefix_normal = list(tuplekey[2:])
             # Handle the common-case where the tuplekey puts us below the batchdepth
             if args.words - prefixmod <= args.batchdepth:
+                _queued_bytes += item_bytes(args.words - prefixmod - 1)
                 mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
             else:
                 traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
