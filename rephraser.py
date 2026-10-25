@@ -38,6 +38,7 @@ _queued_bytes = 0.0  # Producer-side estimate of bytes of work currently sitting
 _last_qsize = 0  # Queue size seen at the previous governor check, to detect consumed items
 _start_time = 0.0  # monotonic time production started, for the startup grace period
 START_GRACE_SECONDS = 30  # No throttling during the first N seconds so output starts fast
+OUTPUT_FLUSH_LINES = 1024  # Worker line-buffer size: one stdout write per N chains
 _avg_branch = 1.0  # Sampled average branching factor of the model (set by estimate_workitem_bytes)
 _bytes_per_chain = 0.0  # Sampled average bytes per generated chain
 worker_pids: list[int] = []  # PIDs of worker processes, for RSS summation
@@ -213,27 +214,26 @@ def sanitizeandmutateword(word: str) -> str:
     else:
         return word.capitalize()
 
-def collectall(state: list, depth: int, func_prefix: list) -> list:
+def collectall(state: list, depth: int, func_prefix: list):
     """
-    Given a compiled DCT and state, return a list of all phrases (lists) of exactly a certain length/depth in titlecase
+    Given a compiled DCT and state, yield phrases (lists) of exactly a certain
+    length/depth in titlecase. A generator so a work item with an enormous
+    number of chains never materializes them all in memory at once.
     """
-    completedchains: list[list[str]] = []
     if DCT is None:
         raise RuntimeError("DCT is not initialized")
 
     state_key = ' '.join(state)
-    if state_key not in DCT:
-        return completedchains
-    cstate_model = DCT[state_key]
+    cstate_model = DCT.get(state_key)
+    if cstate_model is None:
+        return
     if not func_prefix:
         func_prefix = list(state)
     if depth > 1:
         for nextword in cstate_model[0]:
             if nextword != END:
                 nextstate = list(state[1:]) + [nextword]
-                nextreach = collectall(nextstate, depth - 1, func_prefix + [nextword])
-                if nextreach:
-                    completedchains += nextreach
+                yield from collectall(nextstate, depth - 1, func_prefix + [nextword])
     else:
         # fix-up prefix words outside of loop because they won't need to be passed further
         mutated_prefix: list[str] = []
@@ -243,8 +243,7 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
             if nextword not in [END, '']:
                 mutated_word = sanitizeandmutateword(nextword)
                 if mutated_word != '':
-                    completedchains.append(mutated_prefix + [mutated_word])
-    return completedchains
+                    yield mutated_prefix + [mutated_word]
 
 def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None:
     """Worker function to collect all chains of a certain depth, and output them in titlecase"""
@@ -258,13 +257,21 @@ def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None
             state, depth, prefix = arglist
             if state == DONE:
                 break
-            outchains: list[list[str]] = collectall(state, depth, prefix)
-            # output to STDOUT (outlist should be titlecase mutated, result should be titlecase with interspace)
-            if not gpusaturated:
-                lines = [' '.join(outlist) + '\n' for outlist in outchains]
-            else:
-                lines = []
-                for outlist in outchains:
+            # Stream chains out of the collectall generator through a bounded
+            # line buffer: memory stays O(buffer), not O(chains in item), and
+            # gpusaturated items never hold 8x output in memory at once.
+            lines: list[str] = []
+
+            def flushlines(buf: list[str] = lines) -> None:
+                if buf:
+                    sys.stdout.write(''.join(buf))
+                    sys.stdout.flush()
+                    buf.clear()
+
+            for outlist in collectall(state, depth, prefix):
+                if not gpusaturated:
+                    lines.append(' '.join(outlist) + '\n')
+                else:
                     space_joined = ' '.join(outlist)
                     no_space = ''.join(outlist)
                     first, *rest = outlist
@@ -288,9 +295,9 @@ def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False) -> None
                     lines.append(first.lower() + ' ' + rest_space + '\n')
                     # Camelcase without spaces
                     lines.append(first.lower() + rest_no_space + '\n')
-            # One buffered write + flush per work item instead of per line
-            sys.stdout.write(''.join(lines))
-            sys.stdout.flush()
+                if len(lines) >= OUTPUT_FLUSH_LINES:
+                    flushlines()
+            flushlines()
 
 def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, batchdepth: int, func_prefix: list | None = None) -> None:
     """
@@ -386,7 +393,24 @@ def main():
     else:
         worker_num = args.workers
 
-    mpqueue = mp.Queue(MAXQUEUESIZE)
+    # Initialize the memory governor sizing before creating the queue, so the
+    # queue cap can be derived from the per-work-item memory estimate.
+    TOTAL_MEM = get_available_memory()
+    if args.mem_limit > 0:
+        MEM_TARGET = args.mem_limit / 100
+    else:
+        MEM_TARGET = 0  # disables throttle entirely
+    WORKITEM_BYTES = estimate_workitem_bytes(args.batchdepth)
+    queue_capacity = MAXQUEUESIZE
+    if TOTAL_MEM > 0 and WORKITEM_BYTES > 0 and MEM_TARGET > 0:
+        # Hard safety net: cap the queue so a full queue can never exceed a
+        # quarter of the target headroom, leaving the rest for in-flight
+        # expansion inside workers.
+        headroom = int(TOTAL_MEM * MEM_TARGET * 0.25)
+        queue_capacity = max(1, min(MAXQUEUESIZE, headroom // WORKITEM_BYTES))
+        if queue_capacity < MAXQUEUESIZE:
+            sys.stderr.write('[REPHRASER] Queue capacity limited to ' + str(queue_capacity) + ' items by memory governor\n')
+    mpqueue = mp.Queue(queue_capacity)
     GPUSATURATED = args.gpusaturated # Whether to create "Basic8" permutations in CPU workers
     # Spin up workers once and early
     worker_processes = []
@@ -399,14 +423,9 @@ def main():
     # Change signal handling in only parent
     signal(SIGINT, sigint_handler)
 
-    # Initialize the memory governor: predict per-work-item memory cost from the
-    # model and track RSS of parent (model) plus workers against the RAM target.
-    TOTAL_MEM = get_available_memory()
-    if args.mem_limit > 0:
-        MEM_TARGET = args.mem_limit / 100
-    else:
-        MEM_TARGET = 0  # disables throttle entirely
-    WORKITEM_BYTES = estimate_workitem_bytes(args.batchdepth)
+    # Initialize the memory governor: track RSS of parent (model) plus workers
+    # against the RAM target. Sizing (TOTAL_MEM, MEM_TARGET, WORKITEM_BYTES)
+    # was computed before the queue was created.
     worker_pids = [w.pid for w in worker_processes if w.pid is not None]
     # Baseline = RSS of parent (model) plus freshly started (idle) workers, so
     # the governor only reacts to memory growth caused by queued work.
