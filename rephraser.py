@@ -30,7 +30,7 @@ worker_num = 0  # Will be changed before creating workers
 # fraction of physical RAM by pausing the work producer while workers drain
 # the queue. Output still flows while paused, so downstream consumers
 # (hashcat) keep receiving input.
-MEM_TARGET = 0.80  # Fraction of physical RAM we aim to stay under
+MEM_TARGET = 0.70  # Fraction of physical RAM we aim to stay under
 TOTAL_MEM = 0  # Total physical memory in bytes (0 = unknown, governor disabled)
 WORKITEM_BYTES = 0  # Predicted peak memory cost of a single queued work item
 MEM_BASELINE = 0  # RSS of the process tree before any work is queued (model + idle workers)
@@ -345,12 +345,11 @@ def main():
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (gzip-compressed JSON, make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
     parser.add_argument('--ngrams', '-g', type=int, help='Number of words (n-grams) that make up a state in the Markov model, it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM, and 3 for the better linguistic accuracy', choices=[2, 3], default=2)
     parser.add_argument('--corpus', '-c', help='Path to a corpus (file with sentences) to convert into a Markov model', default='')
-    parser.add_argument('--words', '-w', type=int, help='Number of words in outputtable candidates', default=4)
+    parser.add_argument('--words', '-w', type=int, help='Number of words in outputtable candidates', default=1)
     parser.add_argument('--workers', '-x', type=int, help='Manually specify the number of workers', default=mp.cpu_count() - 1)
-    parser.add_argument('--freqlist', '-f', help='Path to a frequency list of *lowercase words*, one per line (E.g. Google 10k most common words), to use as start words. Warning: This is a n^2 operation, and may take a couple minutes to find all chain start-points (in order) depending on model * freqlist size.', default='')
     parser.add_argument('--gpusaturated', '-s', action='store_true', help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes', default=False)
     parser.add_argument('--batchdepth', '-b', type=int, help='Number of ending words/recursions that should be handled in bulk by performing "collectall"', default=3)
-    parser.add_argument('--mem_limit', type=int, help='Percentage of physical RAM the memory governor aims to stay under while queueing work (0 disables the governor)', default=80)
+    parser.add_argument('--mem_limit', type=int, help='Percentage of physical RAM the memory governor aims to stay under while queueing work (0 disables the governor)', default=70)
 
     args = parser.parse_args()
 
@@ -425,92 +424,35 @@ def main():
     else:
         sys.stderr.write('[REPHRASER] Could not determine available system memory, memory governor disabled\n')
 
-    if args.freqlist != '':
-        # Iterate on most-frequently used words input, as long as they in the model
-        freqlist = []
-        if os.path.isfile(args.freqlist):
-            with open(args.freqlist, encoding='utf-8', errors='ignore') as f:
-                freqlist = f.read().split('\n')
+    
+    # Iterate on all keys in chain model, handling most likely key (start of sentence) first
+    if DCT is None:
+        raise RuntimeError("DCT is not initialized")
+    if args.ngrams == 2:
+        traverselikely(mpqueue, (BEGIN, BEGIN), args.words, args.batchdepth, [])
+    elif args.ngrams == 3:
+        traverselikely(mpqueue, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
+    for key in DCT_KEYS:
+        if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
+            continue
+        # Need to convert string keys back into tuples for programmatic use
+        tuplekey = tuple(key.split(' ', args.ngrams - 1))
+        if END in tuplekey:
+            continue
+        prefix_normal = list(tuplekey)
+        prefixmod = args.ngrams
+        if tuplekey[0] == BEGIN:
+            prefixmod = args.ngrams - 1
+            prefix_normal = list(tuplekey[1:])
+        if tuplekey[1] == BEGIN and args.ngrams > 2:
+            prefixmod = args.ngrams - 2
+            prefix_normal = list(tuplekey[2:])
+        # Handle the common-case where the tuplekey puts us below the batchdepth
+        if args.words - prefixmod <= args.batchdepth:
+            _queued_bytes += item_bytes(args.words - prefixmod - 1)
+            mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
         else:
-            sys.stderr.write('[REPHRASER] Couldn\'t find freqlist at ' + args.freqlist + '\n[REPHRASER] Exiting!\n')
-            sys.exit(1)
-        freq_dict = {word.lower(): idx for idx, word in enumerate(freqlist)}
-        freqtuplelists = []
-        # Create array of arrays to hold keys corresponding to words in freqlist
-        for freq in freqlist:
-            freqtuplelists.append([])
-        # Iterate through all markov chain keys, keeping those that are in our freqlist, in the order of freqlist
-        if DCT is None:
-            raise RuntimeError("DCT is not initialized")
-        for key in DCT_KEYS:
-            if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
-                continue
-            if END in key:
-                continue
-            tuplekey = tuple(key.split(' ', args.ngrams - 1))
-            if args.ngrams > 2 and BEGIN in tuplekey[1]:
-                foundindex = freq_dict.get(tuplekey[2].lower())
-                if foundindex is not None:
-                    freqtuplelists[foundindex].append(tuplekey)
-            elif BEGIN in tuplekey[0]:
-                foundindex = freq_dict.get(tuplekey[1].lower())
-                if foundindex is not None:
-                    freqtuplelists[foundindex].append(tuplekey)
-            else:
-                foundindex = freq_dict.get(tuplekey[0].lower())
-                if foundindex is not None:
-                    freqtuplelists[foundindex].append(tuplekey)
-        # No need for freqlist this point onward
-        del freqlist, freq_dict
-        # Iterate on keys, handling the indicated keys only
-        for freqtuplelist in freqtuplelists:
-            if not freqtuplelist:
-                continue
-            for tuplekey in freqtuplelist:
-                prefix_normal = list(tuplekey)
-                prefixmod = args.ngrams
-                if tuplekey[0] == BEGIN:
-                    prefixmod = args.ngrams - 1
-                    prefix_normal = list(tuplekey[1:])
-                if tuplekey[1] == BEGIN and args.ngrams > 2:
-                    prefixmod = args.ngrams - 2
-                    prefix_normal = list(tuplekey[2:])
-                # Handle the common-case where the tuplekey puts us below the batchdepth
-                if args.words - prefixmod <= args.batchdepth:
-                    throttle()
-                    _queued_bytes += item_bytes(args.words - prefixmod - 1)
-                    mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
-                else:
-                    traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
-    else:
-        # Iterate on all keys in chain model, handling most likely key (start of sentence) first
-        if DCT is None:
-            raise RuntimeError("DCT is not initialized")
-        if args.ngrams == 2:
-            traverselikely(mpqueue, (BEGIN, BEGIN), args.words, args.batchdepth, [])
-        elif args.ngrams == 3:
-            traverselikely(mpqueue, (BEGIN, BEGIN, BEGIN), args.words, args.batchdepth, [])
-        for key in DCT_KEYS:
-            if key == f'{BEGIN} {BEGIN}' or key == f'{BEGIN} {BEGIN} {BEGIN}':
-                continue
-            # Need to convert string keys back into tuples for programmatic use
-            tuplekey = tuple(key.split(' ', args.ngrams - 1))
-            if END in tuplekey:
-                continue
-            prefix_normal = list(tuplekey)
-            prefixmod = args.ngrams
-            if tuplekey[0] == BEGIN:
-                prefixmod = args.ngrams - 1
-                prefix_normal = list(tuplekey[1:])
-            if tuplekey[1] == BEGIN and args.ngrams > 2:
-                prefixmod = args.ngrams - 2
-                prefix_normal = list(tuplekey[2:])
-            # Handle the common-case where the tuplekey puts us below the batchdepth
-            if args.words - prefixmod <= args.batchdepth:
-                _queued_bytes += item_bytes(args.words - prefixmod - 1)
-                mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
-            else:
-                traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
+            traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
 
     # Wrap up, send end-of-work signals to workers (one each)
     for worker in worker_processes:
