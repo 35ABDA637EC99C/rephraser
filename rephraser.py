@@ -30,7 +30,7 @@ worker_num = 0  # Will be changed before creating workers
 # fraction of physical RAM by pausing the work producer while workers drain
 # the queue. Output still flows while paused, so downstream consumers
 # (hashcat) keep receiving input.
-MEM_TARGET = 0.80  # Fraction of physical RAM we aim to stay under
+MEM_TARGET = 0.50  # Fraction of physical RAM we aim to stay under
 TOTAL_MEM = 0  # Total physical memory in bytes (0 = unknown, governor disabled)
 WORKITEM_BYTES = 0  # Predicted peak memory cost of a single queued work item
 MEM_BASELINE = 0  # RSS of the process tree before any work is queued (model + idle workers)
