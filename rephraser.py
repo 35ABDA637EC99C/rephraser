@@ -4,6 +4,7 @@ Fork from https://github.com/travco/rephraser
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import multiprocessing as mp
 import os
@@ -11,16 +12,14 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from signal import SIGINT, signal
 
-import keyvi.compiler  # type: ignore[import-untyped]
-import keyvi.dictionary  # type: ignore[import-untyped]
-import markovify  # type: ignore[import-untyped]
+import markovify  # type: ignore[import-untyped]  # ty: ignore[unresolved-import]
 
 BEGIN = '___BEGIN__'
 END = '___END__'
 DONE = '___DONE__'
 undesirable_chars = [',','.',';',':','?','\'','"','"','"','"']
 
-DCT = None  # Global mappings for shared memory managed by keyvi
+DCT = None  # Global dictionary for Markov model data
 DCT_KEYS: set[str] = set()  # Global set of all dictionary keys for iteration
 mpqueue = None # Work queue
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
@@ -38,7 +37,7 @@ else:
 def sigint_handler(signal_received, frame):
   # Parent *should* be able to exit
   sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. Attempting to exit gracefully...\n')
-  last_work_item = mpqueue.get(block=False)
+  last_work_item = mpqueue.get(block=False)  # ty: ignore[unresolved-attribute]
   sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
   sys.exit(0)
 
@@ -54,6 +53,8 @@ def sanitizeandmutateword(word: str) -> str:
     """
     Capitalize the first letter
     """
+    if word == '':
+        return ''
     if word[0] in undesirable_chars:
         word = word[1:]
     if word != '' and word[-1] in undesirable_chars:
@@ -74,7 +75,7 @@ def collectall(state: list, depth: int, func_prefix: list) -> list:
     state_key = ' '.join(state)
     if state_key not in DCT:
         return completedchains
-    cstate_model = DCT[state_key].value
+    cstate_model = DCT[state_key]
     if not func_prefix:
         func_prefix = list(state)
     if depth > 1:
@@ -159,7 +160,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
     state_key = ' '.join(state)
     if state_key not in DCT:
         return
-    cstate_model = DCT[state_key].value
+    cstate_model = DCT[state_key]
     for weights in range(len(cstate_model[1])):
         if weights == 0:
             stateweights.append([cstate_model[1][weights], 0])
@@ -189,7 +190,7 @@ def main():
     global DCT_KEYS, DCT, mpqueue, worker_num  # noqa: PLW0602
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
-    parser.add_argument('--model', '-m', required=True, help='Path to a saved model (make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
+    parser.add_argument('--model', '-m', required=True, help='Path to a saved model (gzip-compressed JSON, make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
     parser.add_argument('--ngrams', '-g', type=int, help='Number of words (n-grams) that make up a state in the Markov model, it is suggested to use 2 for large corpuses where the resulting model size might overrun RAM, and 3 for the better linguistic accuracy', choices=[2, 3], default=2)
     parser.add_argument('--corpus', '-c', help='Path to a corpus (file with sentences) to convert into a Markov model', default='')
     parser.add_argument('--corpusisdir', '-d', action='store_true', help='Handle the "--corpus" path as a directory, and create a model by walking all files inside', default=False)
@@ -206,6 +207,7 @@ def main():
         if args.corpusisdir and os.path.isdir(args.corpus):
             # Load multi-file corpus from --corpus
             COMBINED_MODEL = None
+            mmodel = None
             for (dirpath, _, filenames) in os.walk(args.corpus):
                 for filename in filenames:
                     sys.stderr.write('[REPHRASER] Loading ' + os.path.join(dirpath, filename) + ' ...')
@@ -216,45 +218,46 @@ def main():
                             COMBINED_MODEL = markovify.combine(models=[COMBINED_MODEL, mmodel])
                         else:
                             COMBINED_MODEL = mmodel
-            del mmodel
+            if mmodel is not None:
+                del mmodel
             if COMBINED_MODEL is None:
                 sys.stderr.write('[REPHRASER] No files found in directory ' + args.corpus + ' Exiting!\n')
                 sys.exit(1)
             COMBINED_MODEL.compile(inplace=True)
-            keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
+            DCT = {}
             DCT_KEYS.clear()
             for key in COMBINED_MODEL.chain.model:
                 key_str = ' '.join(key)
                 DCT_KEYS.add(key_str)
-                keyvicompiler.add(key_str, json.dumps(COMBINED_MODEL.chain.model[key]))
+                DCT[key_str] = list(COMBINED_MODEL.chain.model[key])
             del COMBINED_MODEL
-            keyvicompiler.compile()
-            keyvicompiler.write_to_file(args.model)
-            del keyvicompiler
-            DCT = keyvi.dictionary.Dictionary(args.model)
+            with gzip.open(args.model, 'wt', encoding='utf-8') as f:
+                json.dump(DCT, f)
         elif os.path.isfile(args.corpus):
             # Load single-file corpus from --corpus
             with open(args.corpus, encoding='utf-8', errors='ignore') as f:
                 mmodel = markovify.Text(f, retain_original=False, state_size=args.ngrams)
             mmodel.compile(inplace=True)
-            keyvicompiler = keyvi.compiler.JsonDictionaryCompiler()
+            DCT = {}
             DCT_KEYS.clear()
             for key in mmodel.chain.model:
                 key_str = ' '.join(key)
                 DCT_KEYS.add(key_str)
-                keyvicompiler.Add(key_str, json.dumps(mmodel.chain.model[key]))
+                DCT[key_str] = list(mmodel.chain.model[key])
             del mmodel
-            keyvicompiler.Compile()
-            keyvicompiler.WriteToFile(args.model)
-            del keyvicompiler
-            DCT = keyvi.dictionary.Dictionary(args.model)
+            with gzip.open(args.model, 'wt', encoding='utf-8') as f:
+                json.dump(DCT, f)
+        else:
+            sys.stderr.write('[REPHRASER] Corpus path is neither a file nor a directory: ' + args.corpus + '\n[REPHRASER] Exiting!\n')
+            sys.exit(1)
     elif args.model != '':
-        # Load a saved model in a keyvi file
+        # Load a saved model from gzip-compressed JSON file
         if os.path.isfile(args.model):
             DCT_KEYS.clear()
-            DCT = keyvi.dictionary.Dictionary(args.model)
+            with gzip.open(args.model, 'rt', encoding='utf-8') as f:
+                DCT = json.load(f)
             # Populate DCT_KEYS from the dictionary
-            for key_str in DCT.keys():  # noqa: SIM118
+            for key_str in DCT:
                 DCT_KEYS.add(key_str)
         else:
             sys.stderr.write('[REPHRASER] Couldn\'t find model at ' + args.model + '\n[REPHRASER] Exiting!\n')
