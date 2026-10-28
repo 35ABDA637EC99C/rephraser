@@ -378,7 +378,7 @@ def main():
     parser.add_argument('--gpusaturated', '-s', action='store_true', help='If hashcat is liable to be saturated with work, create "Basic8" permutations in the CPU workers, usually nets a little extra performance on fast hashes', default=False)
     parser.add_argument('--batchdepth', '-b', type=int, help='Number of ending words/recursions that should be handled in bulk by performing "collectall"', default=3)
     parser.add_argument('--mem_limit', type=int, help='Percentage of physical RAM the memory governor aims to stay under while queueing work (0 disables the governor)', default=70)
-    parser.add_argument('--flush_lines', type=int, help='Number of output lines workers buffer before writing to stdout in a single batch', default=512)
+    parser.add_argument('--flush_lines', type=int, help='Number of output lines workers buffer before writing to stdout in a single batch', default=5000)
 
     args = parser.parse_args()
 
