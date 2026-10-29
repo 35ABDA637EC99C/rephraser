@@ -503,7 +503,4 @@ def main():
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except BrokenPipeError:
-        sys.stderr.write('[REPHRASER] Broken pipe encountered. Exiting.\n')
+    main()
