@@ -288,9 +288,14 @@ def workercollectall(func_mpqueue: mp.Queue, gpusaturated: bool = False, flush_l
 
             def flushlines(buf: list[str] = lines) -> None:
                 if buf:
-                    sys.stdout.write(''.join(buf))
-                    sys.stdout.flush()
-                    buf.clear()
+                    try:
+                        sys.stdout.write(''.join(buf))
+                        sys.stdout.flush()
+                    except BrokenPipeError:
+                        sys.stderr.write('[REPHRASER] Broken pipe encountered. Exiting.\n')
+                        sys.exit(1)
+                    finally:
+                        buf.clear()
 
             for outlist in collectall(state, depth, prefix):
                 if not gpusaturated:
