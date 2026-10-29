@@ -7,6 +7,7 @@ import argparse
 import gzip
 import multiprocessing as mp
 import os
+import queue
 import sys
 import time
 from functools import lru_cache
@@ -21,8 +22,8 @@ END = '___END__'
 DONE = '___DONE__'
 undesirable_chars: tuple[str, ...] = (',','.',';',':','?','\'','"','`')
 
-DCT = None  # Global dictionary for Markov model data
-mpqueue = None # Work queue
+DCT: dict[str, list] | None = None  # Global dictionary for Markov model data
+mpqueue: mp.Queue  # Work queue, created in main()
 MAXQUEUESIZE = 100000  # Number of work items reasonable to have on queue
 worker_num = 0  # Will be changed before creating workers
 
@@ -36,6 +37,7 @@ WORKITEM_BYTES = 0  # Predicted peak memory cost of a single queued work item
 _avg_branch = 1.0  # Sampled average branching factor of the model (set by estimate_workitem_bytes)
 _bytes_per_chain = 0.0  # Sampled average bytes per generated chain
 worker_pids: list[int] = []  # PIDs of worker processes
+_worker_processes: list[mp.Process] = []  # Live worker Process handles, for liveness checks in safeput
 _worker_base_rss: dict[int, int] = {}  # Idle RSS per worker, so only private growth counts
 _cached_extra_rss = 0  # Last measured combined worker RSS growth
 _last_measure_time = 0.0  # monotonic time of the last measurement (0 = never)
@@ -212,9 +214,18 @@ except RuntimeError:
 def sigint_handler(signal_received, frame):
   # Parent *should* be able to exit
   sys.stderr.write('[REPHRASER] SIGINT or CTRL-C detected. Attempting to exit gracefully...\n')
-  last_work_item = mpqueue.get(block=False)  # ty: ignore[unresolved-attribute]
-  sys.stderr.write('[REPHRASER] Next prefix in queue was: ' + repr(last_work_item)[2] + '\n')
   sys.exit(0)
+
+def safeput(item) -> None:
+  """Queue an item, but give up instead of blocking forever if every worker
+  has already exited (no consumer would ever drain the queue)."""
+  while True:
+    try:
+      mpqueue.put(item, timeout=5)
+      return
+    except queue.Full:
+      if not any(w.is_alive() for w in _worker_processes):
+        raise RuntimeError('All workers exited while work remains queued') from None
 
 def get_version() -> str:
     """Read the installed package version from distribution metadata"""
@@ -361,7 +372,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             # Parallelize below batchdepth; wait until worker memory headroom
             # allows this item's predicted peak cost.
             throttle(item_bytes(depthremaining - 1))
-            func_mpqueue.put([nextstate, depthremaining - 1, func_prefix + [nextword]])
+            safeput([nextstate, depthremaining - 1, func_prefix + [nextword]])
     else:
         for wordindex in stateweights:
             # DCT[state][0 = words][wordindex]
@@ -372,7 +383,7 @@ def traverselikely(func_mpqueue: mp.Queue, state: tuple, depthremaining: int, ba
             traverselikely(func_mpqueue, nextstate, depthremaining - 1, batchdepth, func_prefix + [nextword])
 
 def main():
-    global DCT, mpqueue, worker_num, MEM_LIMIT_BYTES, TOTAL_MEM, WORKITEM_BYTES, worker_pids, _worker_base_rss
+    global DCT, mpqueue, worker_num, MEM_LIMIT_BYTES, TOTAL_MEM, WORKITEM_BYTES, worker_pids, _worker_base_rss, _worker_processes
     parser = argparse.ArgumentParser(prog='rephraser', description='Program for taking in either a model or corpus, and outputting markov chains of a specified word-length', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--version', '-v', action='version', version=f'%(prog)s {get_version()}')
     parser.add_argument('--model', '-m', required=True, help='Path to a saved model (gzip-compressed JSON, make sure to set --ngrams if using 3grams) or where to save the model generated', default='')
@@ -453,6 +464,7 @@ def main():
     # baseline, so only private growth from processing work counts toward
     # the limit (shared, copy-on-write model pages are not double-counted).
     worker_pids = [w.pid for w in worker_processes if w.pid is not None]
+    _worker_processes = worker_processes
     _worker_base_rss = {pid: process_rss(pid) for pid in worker_pids}
     if MEM_LIMIT_BYTES > 0:
         sys.stderr.write('[REPHRASER] Memory governor active: workers limited to ' + str(args.mem_limit) + '% of ' + str(TOTAL_MEM // (1024 * 1024)) + ' MiB RAM, estimated ' + str(WORKITEM_BYTES // 1024) + ' KiB per work item\n')
@@ -486,7 +498,7 @@ def main():
             # Handle the common-case where the tuplekey puts us below the batchdepth
             if args.words - prefixmod <= args.batchdepth:
                 throttle(item_bytes(args.words - prefixmod - 1))
-                mpqueue.put([tuplekey, args.words - prefixmod - 1, prefix_normal])
+                safeput([tuplekey, args.words - prefixmod - 1, prefix_normal])
             else:
                 traverselikely(mpqueue, tuplekey, args.words - prefixmod, args.batchdepth, prefix_normal)
     except WorkAborted:
@@ -494,7 +506,7 @@ def main():
 
     # Wrap up, send end-of-work signals to workers (one each)
     for worker in worker_processes:
-        mpqueue.put([DONE, DONE, DONE])
+        safeput([DONE, DONE, DONE])
 
     sys.stderr.write('\n[REPHRASER] Scheduler work completed! Waiting patiently for workers to finish queued work...\n')
     # Wait for workers to empty queue and hit done signals before killing parent process.
